@@ -1,26 +1,38 @@
 package main
 
 import (
-	"github.com/rwcarlsen/goexif/exif"
 	"errors"
-	"fmt"
-	"log"
+	log "github.com/Sirupsen/logrus"
+	"github.com/rwcarlsen/goexif/exif"
+	"io/ioutil"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
-// Helper
+// Helper to log an error and then exit
 func handleErr(err error) {
 	if err != nil {
-		fmt.Printf("Error:%s\n", err.Error())
-		os.Exit(1)
+		log.Fatal("Error:", err.Error())
 	}
 }
 
+// Helper to get file modification time, useful as a fallback if file is not a jpg.
+func getFileModTime(fileName string) time.Time {
+	stat, err := os.Stat(fileName)
+	if err != nil {
+		log.Error("Unable to get ModTime for file: ", fileName)
+		return time.Now()
+	}
+	return stat.ModTime()
+}
+
+// Get date taken of a file. If it is a jpg it will attempt to use EXIF data
 func getDateTaken(fileName string) (time.Time, error) {
 
 	if len(fileName) <= 0 {
-		log.Print("Pass filename as parameter.")
+		log.Warn("Pass filename as parameter.")
 		return time.Now(), errors.New("Invalid filename passed.")
 	}
 
@@ -29,33 +41,53 @@ func getDateTaken(fileName string) (time.Time, error) {
 		return time.Now(), err
 	}
 
-	log.Printf("filename = %s\n", fileName)
+	fileExt := strings.ToLower(filepath.Ext(fileName))
+	log.Info("filename = ", fileName, " filePath = ", fileExt)
 
 	date := time.Now()
-	data, err := exif.Decode(file)
-	if err != nil {
-		// file might not have exif data, use os.Stat
-		stat, err := os.Stat(fileName)
-		handleErr(err)
 
-		date = stat.ModTime()
+	if fileExt == ".jpg" {
+
+		data, err := exif.Decode(file)
+		if err != nil {
+			// file might not have exif data, use os.Stat
+			date = getFileModTime(fileName)
+		} else {
+			log.Debug("Got here")
+			date, _ = data.DateTime()
+		}
 	} else {
-		date, _ = data.DateTime()
+		date = getFileModTime(fileName)
 	}
 
 	return date, err
 }
+
+func getFilesInDir(dirName string) {
+	files, err := ioutil.ReadDir(dirName)
+	handleErr(err)
+
+	for _, f := range files {
+		fileName := dirName + "/" + f.Name()
+		date, err := getDateTaken(fileName)
+		if err != nil {
+			log.Error("Error occured opening ", fileName, err.Error())
+		}
+
+		log.Info("Date created = ", date)
+	}
+}
+
 func main() {
+	log.SetOutput(os.Stdout)
 	args := os.Args[1:]
 
 	if len(args) < 1 {
-		fmt.Printf("Please pass a filename as a parameter")
-		os.Exit(1)
+		log.Fatal("Please folder name as a parameter")
 	}
 
-	fileName := args[0]
+	dirName := args[0]
 
-	date, _ := getDateTaken(fileName)
+	getFilesInDir(dirName)
 
-	fmt.Printf("Date created = %s", date)
 }
