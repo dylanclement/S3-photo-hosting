@@ -2,8 +2,10 @@ package main
 
 import (
 	"errors"
+	"flag"
 	log "github.com/Sirupsen/logrus"
 	"github.com/rwcarlsen/goexif/exif"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -42,7 +44,6 @@ func getDateTaken(fileName string) (time.Time, error) {
 	}
 
 	fileExt := strings.ToLower(filepath.Ext(fileName))
-	log.Info("filename = ", fileName, " filePath = ", fileExt)
 
 	date := time.Now()
 
@@ -53,7 +54,6 @@ func getDateTaken(fileName string) (time.Time, error) {
 			// file might not have exif data, use os.Stat
 			date = getFileModTime(fileName)
 		} else {
-			log.Debug("Got here")
 			date, _ = data.DateTime()
 		}
 	} else {
@@ -63,31 +63,95 @@ func getDateTaken(fileName string) (time.Time, error) {
 	return date, err
 }
 
-func getFilesInDir(dirName string) {
+// Helper to create a folder
+func createDir(dirName string) {
+	if _, err := os.Stat(dirName); os.IsNotExist(err) {
+		// Ok directory doesn't exist, create it
+		err := os.Mkdir(dirName, 0777)
+		if err != nil {
+			log.Warn("Error happened creating directory:", err.Error())
+		}
+	}
+}
+
+// Loops through all files in a dir
+func getFilesInDir(dirName, outDir string) {
 	files, err := ioutil.ReadDir(dirName)
 	handleErr(err)
 
 	for _, f := range files {
 		fileName := dirName + "/" + f.Name()
+
+		// Get date taken for file
 		date, err := getDateTaken(fileName)
 		if err != nil {
-			log.Error("Error occured opening ", fileName, err.Error())
+			log.Warn(err.Error())
 		}
 
-		log.Info("Date created = ", date)
+		// Organise photo by moving to target folder
+		err = organisePhoto(dirName, f.Name(), outDir, date)
+		if err != nil {
+			log.Error(err.Error())
+		}
+
+		// Upload file to AWS S3 bucket
+		err = uploadS3(fileName, date)
+		if err != nil {
+			log.Error(err.Error())
+		}
+
 	}
 }
 
-func main() {
-	log.SetOutput(os.Stdout)
-	args := os.Args[1:]
+// Helper function to copy a file
+func copyFile(src, dst string) error {
+    in, err := os.Open(src)
+    if err != nil { return err }
+    defer in.Close()
+    out, err := os.Create(dst)
+    if err != nil { return err }
+    defer out.Close()
+    _, err = io.Copy(out, in)
+    cerr := out.Close()
+    if err != nil { return err }
+    return cerr
+}
 
-	if len(args) < 1 {
-		log.Fatal("Please folder name as a parameter")
+func organisePhoto(currDirName, currFileName, outDir string, dateTaken time.Time) error {
+	src := currDirName + currFileName
+	dstDir := outDir + "\\" + dateTaken.Format("2006-01-02")
+	dst := dstDir + "\\" + currFileName
+
+	// Create the output directory
+	createDir(dstDir)
+
+	// Copy the file to the dest dir
+	copyFile(src, dst)
+
+	log.Info(src, " ==> ", dst)
+	return nil
+}
+
+
+func uploadS3(fileName string, dateTaken time.Time) error {
+	// TODO! Upload file to a S3 bucket
+	return nil
+}
+
+func main() {
+
+	// Declare a string parameter
+	inDirNamePtr := flag.String("in", ".", "input directory")
+	outDirNamePtr := flag.String("out", "", "output directory")
+	// Parse command line arguments.
+	flag.Parse()
+	if len(*inDirNamePtr) == 0 {
+		log.Fatal("Error, need to define an input directory.")
+	}
+	if len(*outDirNamePtr) == 0 {
+		log.Fatal("Error, need to define an output directory.")
 	}
 
-	dirName := args[0]
-
-	getFilesInDir(dirName)
+	getFilesInDir(*inDirNamePtr, *outDirNamePtr)
 
 }
