@@ -93,28 +93,27 @@ func getFilesInDir(dirName, outDir string) {
 		if err != nil {
 			log.Error(err.Error())
 		}
-
-		// Upload file to AWS S3 bucket
-		err = uploadS3(fileName, date)
-		if err != nil {
-			log.Error(err.Error())
-		}
-
 	}
 }
 
 // Helper function to copy a file
 func copyFile(src, dst string) error {
-    in, err := os.Open(src)
-    if err != nil { return err }
-    defer in.Close()
-    out, err := os.Create(dst)
-    if err != nil { return err }
-    defer out.Close()
-    _, err = io.Copy(out, in)
-    cerr := out.Close()
-    if err != nil { return err }
-    return cerr
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	cerr := out.Close()
+	if err != nil {
+		return err
+	}
+	return cerr
 }
 
 func organisePhoto(currDirName, currFileName, outDir string, dateTaken time.Time) error {
@@ -129,12 +128,6 @@ func organisePhoto(currDirName, currFileName, outDir string, dateTaken time.Time
 	copyFile(src, dst)
 
 	log.Info(src, " ==> ", dst)
-	return nil
-}
-
-
-func uploadS3(fileName string, dateTaken time.Time) error {
-	// TODO! Upload file to a S3 bucket
 	return nil
 }
 
@@ -153,5 +146,4 @@ func main() {
 	}
 
 	getFilesInDir(*inDirNamePtr, *outDirNamePtr)
-
 }
