@@ -79,7 +79,7 @@ func createDir(dirName string) {
 		// Ok directory doesn't exist, create it
 		err := os.Mkdir(dirName, 0777)
 		if err != nil {
-			log.Warn("Error happened creating directory:", err.Error())
+			log.Warn("Error creating directory:", err.Error())
 		}
 	}
 }
@@ -104,24 +104,27 @@ func copyFile(src, dst string) error {
 	return cerr
 }
 
-func processPhoto(fileName, outDir, bucketName string, dateTaken time.Time) error {
-	outPath := filepath.Join(dateTaken.Format("2006/2006-01-02"), filepath.Base(fileName))
+func processPhoto(sourceFile, outDir, bucketName, awsRegion string, dateTaken time.Time) error {
+	outPath := dateTaken.Format("2006/2006-01-02")
 	if len(outDir) > 0 {
-		destDir := filepath.Join(outDir, outPath)
-		createDir(destDir)
-		copyFile(fileName, destDir)
-		log.Info("Copied file: " + fileName)
+		createDir(filepath.Join(outDir, dateTaken.Format("2006")))
+		createDir(filepath.Join(outDir, dateTaken.Format("2006/2006-01-02")))
+		fileName := filepath.Base(sourceFile)
+		destPath := filepath.Join(outDir, outPath, fileName)
+
+		copyFile(sourceFile, destPath)
+		log.Info("Copied file: " + destPath)
 	}
 	if len(bucketName) > 0 {
-		uploadFile(fileName, bucketName, outPath)
-		log.Info("Uploaded file to bucket" + bucketName)
+		uploadFile(sourceFile, bucketName, outPath, awsRegion)
+		log.Info("Uploaded file to bucket: " + bucketName)
 	}
 	// TODO! Write index.html file
 	return nil
 }
 
 // Loops through all files in a dir
-func organiseFiles(inDirName, outDirName, bucketName string) {
+func organiseFiles(inDirName, outDirName, bucketName, awsRegion string) {
 	files, err := ioutil.ReadDir(inDirName)
 	handleErr(err)
 
@@ -135,15 +138,15 @@ func organiseFiles(inDirName, outDirName, bucketName string) {
 		}
 
 		// Organise photo by moving to target folder
-		err = processPhoto(fileName, outDirName, bucketName, date)
+		err = processPhoto(fileName, outDirName, bucketName, awsRegion, date)
 		if err != nil {
 			log.Error(err.Error())
 		}
+		log.Info("Done processing: ", inDirName)
 	}
 }
 
-func uploadFile(fileName, destName, bucketName string) error {
-	// TODO! Upload file to a S3 bucket
+func uploadFile(fileName, destName, bucketName, awsRegion string) error {
 	svc := s3.New(session.New(&aws.Config{Region: aws.String("ap-southeast-2")}))
 
 	file, err := os.Open(fileName)
@@ -201,14 +204,16 @@ func uploadFile(fileName, destName, bucketName string) error {
 func main() {
 
 	// Declare a string parameter
-	inDirNamePtr := flag.String("i", ".", "input directory")
-	outDirNamePtr := flag.String("o", ".", "output directory")
+	inDirNamePtr := flag.String("i", "", "input directory")
+	outDirNamePtr := flag.String("o", "", "output directory")
 	bucketNamePtr := flag.String("b", "", "bucket name")
+	awsRegionNamePtr := flag.String("r", "", "AWS region")
 	// Parse command line arguments.
 	flag.Parse()
 	if len(*inDirNamePtr) == 0 {
 		log.Fatal("Error, need to define an input directory.")
 	}
 
-	organiseFiles(*inDirNamePtr, *outDirNamePtr, *bucketNamePtr)
+	organiseFiles(*inDirNamePtr, *outDirNamePtr, *bucketNamePtr, *awsRegionNamePtr)
+	log.Info("Done")
 }
