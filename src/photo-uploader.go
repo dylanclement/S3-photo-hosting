@@ -106,17 +106,19 @@ func copyFile(src, dst string) error {
 
 func processPhoto(sourceFile, outDir, bucketName, awsRegion string, dateTaken time.Time) error {
 	outPath := dateTaken.Format("2006/2006-01-02")
+	fileName := filepath.Base(sourceFile)
+
 	if len(outDir) > 0 {
 		createDir(filepath.Join(outDir, dateTaken.Format("2006")))
 		createDir(filepath.Join(outDir, dateTaken.Format("2006/2006-01-02")))
-		fileName := filepath.Base(sourceFile)
 		destPath := filepath.Join(outDir, outPath, fileName)
 
 		copyFile(sourceFile, destPath)
 		log.Info("Copied file: " + destPath)
 	}
 	if len(bucketName) > 0 {
-		uploadFile(sourceFile, bucketName, outPath, awsRegion)
+		destPath := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
+		uploadFile(sourceFile, destPath, bucketName, awsRegion)
 		log.Info("Uploaded file to bucket: " + bucketName)
 	}
 	// TODO! Write index.html file
@@ -147,7 +149,7 @@ func organiseFiles(inDirName, outDirName, bucketName, awsRegion string) {
 }
 
 func uploadFile(fileName, destName, bucketName, awsRegion string) error {
-	svc := s3.New(session.New(&aws.Config{Region: aws.String("ap-southeast-2")}))
+	svc := s3.New(session.New(&aws.Config{Region: aws.String(awsRegion)}))
 
 	file, err := os.Open(fileName)
 
@@ -182,6 +184,7 @@ func uploadFile(fileName, destName, bucketName, awsRegion string) error {
 		// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
 	}
 
+	log.Info("Uploading " + destName + " to " + bucketName)
 	_, err = svc.PutObject(params)
 
 	if err != nil {
@@ -207,7 +210,7 @@ func main() {
 	inDirNamePtr := flag.String("i", "", "input directory")
 	outDirNamePtr := flag.String("o", "", "output directory")
 	bucketNamePtr := flag.String("b", "", "bucket name")
-	awsRegionNamePtr := flag.String("r", "", "AWS region")
+	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
 	// Parse command line arguments.
 	flag.Parse()
 	if len(*inDirNamePtr) == 0 {
