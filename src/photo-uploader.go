@@ -37,13 +37,7 @@ func getFilesInDir(dirName, outDir string) {
 		}
 
 		// Organise photo by moving to target folder
-		err = organisePhoto(dirName, f.Name(), outDir, date)
-		if err != nil {
-			log.Error(err.Error())
-		}
-
-		// Upload file to AWS S3 bucket
-		err = uploadS3(fileName, date)
+		err = organisePhoto(fileName, bucketName, outDir, date)
 		if err != nil {
 			log.Error(err.Error())
 		}
@@ -65,36 +59,43 @@ func listBuckets() {
 	return nil
 }
 
-func uploadS3(fileName string, dateTaken time.Time) error {
+func uploadS3(fileName, bucketName, outPath string) error {
 	// TODO! Upload file to a S3 bucket
-	svc := s3.New(session.New(&aws.Config{Region: aws.String("ap-southeast-2")}))
-	result, err := svc. (&s3.ListBucketsInput{})
-	if err != nil {
-		log.Println("Failed to list buckets", err)
-		return err
-	}
+	//svc := s3.New(session.New(&aws.Config{Region: aws.String("ap-southeast-2")}))
 
-	log.Println("Buckets:")
-	for _, bucket := range result.Buckets {
-		log.Printf("%s : %s\n", aws.StringValue(bucket.Name), bucket.CreationDate)
-	}
+	Log.Info("Uploading file to bucket: " + fileName)
 	return nil
 }
+
+
+func organisePhoto(fileName, bucketName, outDir string, dateTaken time.Time) error {
+	outPath := filePath.Join(dateTaken.Format("2006/2006-01-02"), filePath.Base(fileName))
+	if outDir.Len > 0 {
+		destDir := filePath.Join(outDir, outPath)
+		createDir(destDir)
+		copyFile(fileName, destDir)
+		Log.Info("Copied file: " + fileName)
+	}
+	if bucketName.Len > 0 {
+		uploadS3(fileName, bucketName, outPath)
+		Log.Info("Uploaded file to bucket" + bucketName)
+	}
+	// TODO! Write index.html file
+	return nil
+}
+
 
 func main() {
 
 	// Declare a string parameter
-	inDirNamePtr := flag.String("in", ".", "input directory")
-	bucketNamePtr := flag.String("bucket", "", "bucket name")
+	inDirNamePtr := flag.String("i", ".", "input directory")
+	outDirNamePtr := flag.String("o", "", "output directory")
+	bucketNamePtr := flag.String("b", "", "bucket name")
 	// Parse command line arguments.
 	flag.Parse()
 	if len(*inDirNamePtr) == 0 {
 		log.Fatal("Error, need to define an input directory.")
 	}
-	if len(*bucketNamePtr) == 0 {
-		log.Fatal("Error, need to define a bucket name.")
-	}
 
-	uploadS3(*inDirNamePtr, *bucketNamePtr)
-
+	getFilesInDir(*inDirNamePtr, *bucketNamePtr, *outDirNamePtr)
 }
