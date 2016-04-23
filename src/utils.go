@@ -2,11 +2,9 @@ package main
 
 import (
 	"errors"
-	"flag"
 	log "github.com/Sirupsen/logrus"
 	"github.com/rwcarlsen/goexif/exif"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,28 +72,6 @@ func createDir(dirName string) {
 	}
 }
 
-// Loops through all files in a dir
-func getFilesInDir(dirName, outDir string) {
-	files, err := ioutil.ReadDir(dirName)
-	handleErr(err)
-
-	for _, f := range files {
-		fileName := dirName + "/" + f.Name()
-
-		// Get date taken for file
-		date, err := getDateTaken(fileName)
-		if err != nil {
-			log.Warn(err.Error())
-		}
-
-		// Organise photo by moving to target folder
-		err = organisePhoto(dirName, f.Name(), outDir, date)
-		if err != nil {
-			log.Error(err.Error())
-		}
-	}
-}
-
 // Helper function to copy a file
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
@@ -114,36 +90,4 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return cerr
-}
-
-func organisePhoto(currDirName, currFileName, outDir string, dateTaken time.Time) error {
-	src := currDirName + currFileName
-	dstDir := outDir + "\\" + dateTaken.Format("2006-01-02")
-	dst := dstDir + "\\" + currFileName
-
-	// Create the output directory
-	createDir(dstDir)
-
-	// Copy the file to the dest dir
-	copyFile(src, dst)
-
-	log.Info(src, " ==> ", dst)
-	return nil
-}
-
-func main() {
-
-	// Declare a string parameter
-	inDirNamePtr := flag.String("in", ".", "input directory")
-	outDirNamePtr := flag.String("out", "", "output directory")
-	// Parse command line arguments.
-	flag.Parse()
-	if len(*inDirNamePtr) == 0 {
-		log.Fatal("Error, need to define an input directory.")
-	}
-	if len(*outDirNamePtr) == 0 {
-		log.Fatal("Error, need to define an output directory.")
-	}
-
-	getFilesInDir(*inDirNamePtr, *outDirNamePtr)
 }

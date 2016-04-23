@@ -7,23 +7,14 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"io"
 	"io/ioutil"
-	"os"
-	"path/filepath"
-	"strings"
+	filePath "path/filepath"
+	//"strings"
 	"time"
 )
 
-// Helper to log an error and then exit
-func handleErr(err error) {
-	if err != nil {
-		log.Fatal("Error:", err.Error())
-	}
-}
-
 // Loops through all files in a dir
-func getFilesInDir(dirName, outDir string) {
+func processDir(dirName, bucketName, outDir string) {
 	files, err := ioutil.ReadDir(dirName)
 	handleErr(err)
 
@@ -37,14 +28,14 @@ func getFilesInDir(dirName, outDir string) {
 		}
 
 		// Organise photo by moving to target folder
-		err = organisePhoto(fileName, bucketName, outDir, date)
+		err = processPhoto(fileName, bucketName, outDir, date)
 		if err != nil {
 			log.Error(err.Error())
 		}
 	}
 }
 
-func listBuckets() {
+func listBuckets() error {
 	svc := s3.New(session.New(&aws.Config{Region: aws.String("ap-southeast-2")}))
 	result, err := svc.ListBuckets(&s3.ListBucketsInput{})
 	if err != nil {
@@ -63,22 +54,22 @@ func uploadS3(fileName, bucketName, outPath string) error {
 	// TODO! Upload file to a S3 bucket
 	//svc := s3.New(session.New(&aws.Config{Region: aws.String("ap-southeast-2")}))
 
-	Log.Info("Uploading file to bucket: " + fileName)
+	log.Println("Uploading file to bucket: " + fileName)
 	return nil
 }
 
 
-func organisePhoto(fileName, bucketName, outDir string, dateTaken time.Time) error {
+func processPhoto(fileName, bucketName, outDir string, dateTaken time.Time) error {
 	outPath := filePath.Join(dateTaken.Format("2006/2006-01-02"), filePath.Base(fileName))
-	if outDir.Len > 0 {
+	if len(outDir) > 0 {
 		destDir := filePath.Join(outDir, outPath)
 		createDir(destDir)
 		copyFile(fileName, destDir)
-		Log.Info("Copied file: " + fileName)
+		log.Info("Copied file: " + fileName)
 	}
-	if bucketName.Len > 0 {
+	if len(bucketName) > 0 {
 		uploadS3(fileName, bucketName, outPath)
-		Log.Info("Uploaded file to bucket" + bucketName)
+		log.Info("Uploaded file to bucket" + bucketName)
 	}
 	// TODO! Write index.html file
 	return nil
@@ -97,5 +88,5 @@ func main() {
 		log.Fatal("Error, need to define an input directory.")
 	}
 
-	getFilesInDir(*inDirNamePtr, *bucketNamePtr, *outDirNamePtr)
+	processDir(*inDirNamePtr, *bucketNamePtr, *outDirNamePtr)
 }
