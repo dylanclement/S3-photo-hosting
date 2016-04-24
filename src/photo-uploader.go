@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image/jpeg"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nfnt/resize"
 	log "github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -148,6 +150,33 @@ func organiseFiles(inDirName, outDirName, bucketName, awsRegion string) {
 	}
 }
 
+func createThumbNail(string inFile, ) io.Writer {
+    file, err := os.Open(inFile)
+    if err != nil {
+        log.Fatal(err)
+    }
+		defer file.Close()
+
+    // decode jpeg into image.Image
+    img, err := jpeg.Decode(file)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // resize to width 64 using Lanczos resampling
+    // and preserve aspect ratio
+    m := resize.Resize(64, 0, img, resize.Lanczos3)
+
+    out, err := os.Create("test_resized.jpg")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer out.Close()
+
+    // write new image to file
+    jpeg.Encode(out, m, nil)
+}
+
 func uploadFile(fileName, destName, bucketName, awsRegion string) error {
 	svc := s3.New(session.New(&aws.Config{Region: aws.String(awsRegion)}))
 
@@ -184,7 +213,6 @@ func uploadFile(fileName, destName, bucketName, awsRegion string) error {
 		// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
 	}
 
-	log.Info("Uploading " + destName + " to " + bucketName)
 	_, err = svc.PutObject(params)
 
 	if err != nil {
