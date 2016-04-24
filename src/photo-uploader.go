@@ -15,12 +15,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nfnt/resize"
 	log "github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/nfnt/resize"
 	"github.com/rwcarlsen/goexif/exif"
 )
 
@@ -150,31 +150,28 @@ func organiseFiles(inDirName, outDirName, bucketName, awsRegion string) {
 	}
 }
 
-func createThumbNail(string inFile, ) io.Writer {
-    file, err := os.Open(inFile)
-    if err != nil {
-        log.Fatal(err)
-    }
-		defer file.Close()
+func createThumbNail(inFile string) io.Writer {
+	file, err := os.Open(inFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
 
-    // decode jpeg into image.Image
-    img, err := jpeg.Decode(file)
-    if err != nil {
-        log.Fatal(err)
-    }
+	// decode jpeg into image.Image
+	img, err := jpeg.Decode(file)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    // resize to width 64 using Lanczos resampling
-    // and preserve aspect ratio
-    m := resize.Resize(64, 0, img, resize.Lanczos3)
+	// resize to width 64 using Lanczos resampling
+	// and preserve aspect ratio
+	m := resize.Resize(64, 0, img, resize.Lanczos3)
 
-    out, err := os.Create("test_resized.jpg")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer out.Close()
+	out := bytes.NewWriter()
+	// write new image to file
+	jpeg.Encode(out, m, nil)
 
-    // write new image to file
-    jpeg.Encode(out, m, nil)
+	return out
 }
 
 func uploadFile(fileName, destName, bucketName, awsRegion string) error {
