@@ -2,6 +2,7 @@ package main
 
 import (
 	//	"errors"
+
 	"bytes"
 	"errors"
 	"flag"
@@ -150,7 +151,7 @@ func organiseFiles(inDirName, outDirName, bucketName, awsRegion string) {
 	}
 }
 
-func createThumbNail(inFile string) io.Writer {
+func createThumbNail(inFile string) []byte {
 	file, err := os.Open(inFile)
 	if err != nil {
 		log.Fatal(err)
@@ -167,16 +168,37 @@ func createThumbNail(inFile string) io.Writer {
 	// and preserve aspect ratio
 	m := resize.Resize(64, 0, img, resize.Lanczos3)
 
-	out := bytes.NewWriter()
+	out := new(bytes.Buffer)
 	// write new image to file
 	jpeg.Encode(out, m, nil)
 
-	return out
+	return out.Bytes()
+}
+
+func uploadToS3(destName, bucketName, awsRegion string, buffer []byte, size int64) error {
+	fileBytes := bytes.NewReader(buffer) // convert to io.ReadSeeker type
+
+	fileType := http.DetectContentType(buffer)
+
+	params := &s3.PutObjectInput{
+		Bucket:        aws.String(bucketName),    // required
+		Key:           aws.String(destName),      // required
+		ACL:           aws.String("public-read"), // Needed to allow anonymous access
+		Body:          fileBytes,
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String(fileType),
+		Metadata: map[string]*string{
+			"Key": aws.String("MetadataValue"), //required
+		},
+		// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
+	}
+
+	svc := s3.New(session.New(&aws.Config{Region: aws.String(awsRegion)}))
+	_, err := svc.PutObject(params)
+	return err
 }
 
 func uploadFile(fileName, destName, bucketName, awsRegion string) error {
-	svc := s3.New(session.New(&aws.Config{Region: aws.String(awsRegion)}))
-
 	file, err := os.Open(fileName)
 
 	if err != nil {
@@ -193,25 +215,13 @@ func uploadFile(fileName, destName, bucketName, awsRegion string) error {
 	// read file content to buffer
 	file.Read(buffer)
 
-	fileBytes := bytes.NewReader(buffer) // convert to io.ReadSeeker type
+	err = uploadToS3(destName, bucketName, awsRegion, buffer, size)
 
-	fileType := http.DetectContentType(buffer)
-
-	params := &s3.PutObjectInput{
-		Bucket:        aws.String(bucketName), // required
-		Key:           aws.String(destName),   // required
-		ACL:           aws.String("public-read"),
-		Body:          fileBytes,
-		ContentLength: aws.Int64(size),
-		ContentType:   aws.String(fileType),
-		Metadata: map[string]*string{
-			"Key": aws.String("MetadataValue"), //required
-		},
-		// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
+	if strings.ToLower(filepath.Ext(fileName)) == ".jpg" {
+		thumbBuf := createThumbNail(fileName)
+		log.Info("Creating thumbnail for fileName")
+		uploadToS3(strings.Replace(destName, ".jpg", "_thumb.jpg", 1), bucketName, awsRegion, thumbBuf, int64(len(thumbBuf)))
 	}
-
-	_, err = svc.PutObject(params)
-
 	if err != nil {
 		if awsErr, ok := err.(awserr.Error); ok {
 			// Generic AWS Error with Code, Message, and original error (if any)
@@ -226,7 +236,7 @@ func uploadFile(fileName, destName, bucketName, awsRegion string) error {
 			fmt.Println(err.Error())
 		}
 	}
-	return nil
+	return err
 }
 
 func main() {
