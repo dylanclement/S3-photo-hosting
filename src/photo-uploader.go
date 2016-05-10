@@ -26,6 +26,12 @@ func defaultTime() time.Time {
 	return time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 }
 
+// Checks whether a file is a jpeg
+func isJpeg(fileName string) bool {
+	fileExt := strings.ToLower(filepath.Ext(fileName))
+	return fileExt == ".jpg" || fileExt == ".jpeg"
+}
+
 // Helper to get file modification time, useful as a fallback if file is not a jpg.
 func getFileModTime(fileName string) time.Time {
 	stat, err := os.Stat(fileName)
@@ -42,34 +48,35 @@ func getDateTaken(fileName string) (time.Time, error) {
 		return defaultTime(), errors.New("Invalid filename passed.")
 	}
 
-	file, err := os.Open(fileName)
-	if err != nil {
-		return defaultTime(), err
-	}
-
 	// Get the file extension for example .jpg
-	fileExt := strings.ToLower(filepath.Ext(fileName))
-
-	if fileExt != ".jpg" {
+	if !isJpeg(fileName) {
 		// Get the current date and time for files that aren't photos
 		return getFileModTime(fileName), nil
 	}
 
-	var date time.Time
-	var data *exif.Exif
+	// Make sure we can open the file
+	file, err := os.Open(fileName)
+	if err != nil {
+		return defaultTime(), err
+	}
+	defer file.Close()
 
+	// Decode exif data from file
+	var data *exif.Exif
+	var date time.Time
 	data, err = exif.Decode(file)
 	if err != nil {
 		// file might not have exif data, use os.Stat
 		date = getFileModTime(fileName)
 	} else {
+		// get date taken from exif data in jpg
 		date, _ = data.DateTime()
 	}
 
 	return date, nil
 }
 
-// Create a folder
+// helper to create a folder if it doesn't exist
 func createDir(dirName string) {
 	if _, err := os.Stat(dirName); os.IsNotExist(err) {
 		// Ok directory doesn't exist, create it
@@ -155,7 +162,6 @@ func createThumbNail(inFile string, width uint) ([]byte, error) {
 
 	// resize to width using Lanczos resampling and preserve aspect ratio
 	m := resize.Resize(width, 0, img, resize.Lanczos3)
-
 	out := new(bytes.Buffer)
 
 	// write new image to buffer
@@ -187,7 +193,7 @@ func uploadFile(svc s3.S3, fileName, destName, bucketName string) error {
 	UploadToS3(svc, destName, bucketName, buffer, size)
 
 	// If this is a photo create a thumbnail
-	if strings.ToLower(filepath.Ext(fileName)) == ".jpg" {
+	if isJpeg(fileName) {
 		thumbBuf, thumbErr := createThumbNail(fileName, 128)
 		if thumbErr != nil {
 			log.Error("Error creating thumbnail: ", err.Error())
@@ -196,7 +202,6 @@ func uploadFile(svc s3.S3, fileName, destName, bucketName string) error {
 		UploadToS3(svc, strings.Replace(destName, ".jpg", "_thumb.jpg", 1), bucketName, thumbBuf, int64(len(thumbBuf)))
 	}
 	// TODO! create a thumbnail for movies
-	// TODO! upload index.html
 
 	return err
 }
@@ -208,11 +213,11 @@ func getFiles(inDirName string) []string {
 		log.Fatal(err.Error())
 	}
 
-	numFiles := len(files)
-	fileArr := make([]string, numFiles)
+	fileArr := make([]string, len(files))
 	for idx, f := range files {
 		fileArr[idx] = inDirName + "/" + f.Name()
 	}
+	// TODO! Group by date, can then update index/json once per grouping
 
 	return fileArr
 }
