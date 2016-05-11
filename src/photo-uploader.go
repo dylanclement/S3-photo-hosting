@@ -21,35 +21,7 @@ import (
 	"github.com/rwcarlsen/goexif/exif"
 )
 
-// Every folder in the bucket has a json file that lists the files
-func addFilesToBucket(svc s3.S3, sourceName, bucketName, fileName string) {
-
-	res, _ := GetFromS3(svc, sourceName+"/photos.json", bucketName)
-
-	// TODO! If it doesn't exist, create an empty buffer for res
-	log.Info("Adding file ", fileName, " to source ", sourceName, " Res = ", res)
-
-	// Read files from Json into map
-	var dat map[string][]string
-	if err := json.NewDecoder(res).Decode(&dat); err != nil {
-		log.Fatal(err)
-	}
-
-	// Add fileName
-	var files = dat["files"]
-	files = append(files, fileName)
-	log.Info("Files = ", files, " obj = ")
-
-	output, err := json.Marshal(dat)
-	if err != nil {
-		panic(err)
-	}
-
-	// Upload updated file to bucket
-	UploadToS3(svc, sourceName+fileName, bucketName, output, int64(len(output)))
-}
-
-// Gets a list of all objects ina a S3 bucket
+// Gets a list of all objects in a a S3 bucket
 func getObjectsFromBucket(svc s3.S3, bucketName, folder string) []*s3.Object {
 	params := &s3.ListObjectsInput{
 		Bucket: aws.String(bucketName),
@@ -73,7 +45,6 @@ func createJSONFile(svc s3.S3, bucketName, folderName string, objects []*s3.Obje
 		}
 	}
 	json += `]}`
-	log.Info("Results = ", json)
 	return json
 }
 
@@ -84,9 +55,44 @@ func createWebsite(svc s3.S3, bucketName, folderName string) error {
 	return nil
 }
 
-func updateFolderWebsite(svc s3.S3, bucketName, folderName string) error {
-	test := strings.Replace(folderTemplate, "<%Title%>", folderName, -1)
-	UploadToS3(svc, folderName+"/index.html", bucketName, []byte(test), int64(len(test)))
+func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
+	// Create dates.json file
+	dateYear := date.Format("2006")
+	dateFull := date.Format("2006-01-02")
+	datesFile := dateYear + "/dates.json"
+
+	// Unmarshal into struct
+	/*type dateFileStruct struct {
+		dates []string
+	}*/
+	var dateStruct map[string][]string
+	reader, _ := GetFromS3(svc, datesFile, bucketName)
+	if reader != nil {
+		// file doesn't exist, create it
+		dateStruct = make(map[string][]string)
+	} else {
+		json.NewDecoder(reader).Decode(&dateStruct)
+	}
+
+	// Check if date exists in array
+	found := false
+	for _, dateF := range dateStruct["dates"] {
+		if dateFull == dateF {
+			found = true
+		}
+	}
+
+	// Date doesn't exist in list
+	if !found {
+		dateStruct["dates"] = append(dateStruct["dates"], dateFull)
+		dateJSON, _ := json.Marshal(dateStruct)
+		log.Info("Date json = ", string(dateJSON), " - ", dateStruct)
+		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)))
+	}
+
+	// Create index.html file
+	test := strings.Replace(folderTemplate, "<%Title%>", dateYear, -1)
+	UploadToS3(svc, dateYear+"/index.html", bucketName, []byte(test), int64(len(test)))
 	return nil
 }
 
@@ -103,7 +109,7 @@ func processBucket(svc s3.S3, bucketName string, date time.Time) error {
 	jsonFile := createJSONFile(svc, bucketName, folderName, objects)
 	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)))
 	createWebsite(svc, bucketName, folderName)
-	updateFolderWebsite(svc, bucketName, date.Format("2006"))
+	updateFolderWebsite(svc, bucketName, date)
 	updateMainWebsite(svc, bucketName)
 	return nil
 }
@@ -324,7 +330,6 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 		}
 		processBucket(*svc, bucketName, date)
 	}
-	log.Info("Done processing: ", inDirName)
 }
 
 func main() {
@@ -384,9 +389,6 @@ const websiteTemplate = `<!doctype html>
 				<a href="{{filename}}"><img ng-src="{{getThumbJpg(filename)}}" class="img-thumbnail" /></a>
 			</div>
 		</div>
-		<div class="footer">
-			<!--p class="muted">&copy; dylan clement 2016</p-->
-		</div>
 	</div>
 </body>
 </html>`
@@ -410,17 +412,17 @@ const folderTemplate = `<!doctype html>
 </script>
 </head>
 <body>
-<a href="<%Back%>">Back</a>
-<div class="container" ng-controller="MainCtrl">
-	<div class="navbar" />
-	<div class="body">
-		<div ng-repeat="date in dates">
-			<p>{{date}}</p>
-			<a href="{{date}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+	<!--a href="<%Back%>">Back</a-->
+	<div class="container" ng-controller="MainCtrl">
+		<h1><%Title%></h1>
+		</br>
+		<div class="navbar" />
+		<div class="body">
+			<div ng-repeat="date in dates">
+				<p>{{date}}</p>
+				<a href="{{date}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+			</div>
 		</div>
-	</div>
-	<div class="footer">
-		<p class="muted">&copy; dylan clement 2016</p>
 	</div>
 </div>
 </body>
@@ -436,34 +438,25 @@ const mainTemplate = `<!doctype html>
     var myApp = angular.module('myApp',[]);
 
     myApp.controller("MainCtrl", function($scope, $http, $q) {
-      var res = $http.get("photos.json").then(function successCallback(results) {
-        $scope.files = results.data.files;
+      var res = $http.get("years.json").then(function successCallback(results) {
+        $scope.years = results.data.years;
       }, function errorCallback(response) {
         alert(response)
       })
-
-      // gets thethumbnail name for the file
-      $scope.getThumbJpg = function(fileName) {
-        console.log("Test, " + fileName)
-        var idx = fileName.lastIndexOf(".");
-        return fileName.slice(0, idx) + "_thumb" + fileName.slice(idx);
-      }
     });
 </script>
 </head>
 <body>
-  <a href="<%Back%>">Back</a>
-  <div class="container" ng-controller="MainCtrl">
-    <div class="navbar" />
-    <div class="body">
-      <div ng-repeat="filename in files">
-        <p>{{filename}} - {{getThumbJpg(filename)}}</p>
-        <a href="{{filename}}"><img ng-src="{{getThumbJpg(filename)}}" class="img-thumbnail" /></a>
-      </div>
-    </div>
-    <div class="footer">
-      <p class="muted">&copy; dylan clement 2016</p>
-    </div>
+	<div class="container" ng-controller="MainCtrl">
+		<h1><%Title%></h1>
+		</br>
+		<div class="navbar" />
+		<div class="body">
+			<div ng-repeat="year in years">
+				<p>{{year}}</p>
+				<a href="{{year}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+			</div>
+		</div>
   </div>
 </body>
 </html>`

@@ -61,6 +61,10 @@ func GetFromS3(svc s3.S3, sourceName, bucketName string) (io.Reader, int64) {
 	resp, err := svc.GetObject(params)
 	if err != nil {
 		if awsErr, ok := err.(awserr.Error); ok {
+			if awsErr.Code() == "NoSuchKey" {
+				// file doesn exist
+				return nil, 0
+			}
 			// Generic AWS Error with Code, Message, and original error (if any)
 			log.Error("AWS error: ", awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
 			if reqErr, ok := err.(awserr.RequestFailure); ok {
@@ -74,6 +78,5 @@ func GetFromS3(svc s3.S3, sourceName, bucketName string) (io.Reader, int64) {
 		}
 	}
 
-	log.Info("Response = ", *resp, *resp.ContentLength)
 	return resp.Body, *resp.ContentLength
 }
