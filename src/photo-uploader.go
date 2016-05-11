@@ -3,7 +3,7 @@ package main
 import (
 	//	"errors"
 	"bytes"
-	"errors"
+	"encoding/json"
 	"flag"
 	"image/jpeg"
 	"io"
@@ -20,6 +20,121 @@ import (
 	"github.com/nfnt/resize"
 	"github.com/rwcarlsen/goexif/exif"
 )
+
+// Every folder in the bucket has a json file that lists the files
+func addFilesToBucket(svc s3.S3, sourceName, bucketName, fileName string) {
+
+	res, _ := GetFromS3(svc, sourceName+"/photos.json", bucketName)
+
+	// TODO! If it doesn't exist, create an empty buffer for res
+	log.Info("Adding file ", fileName, " to source ", sourceName, " Res = ", res)
+
+	// Read files from Json into map
+	var dat map[string][]string
+	if err := json.NewDecoder(res).Decode(&dat); err != nil {
+		log.Fatal(err)
+	}
+
+	// Add fileName
+	var files = dat["files"]
+	files = append(files, fileName)
+	log.Info("Files = ", files, " obj = ")
+
+	output, err := json.Marshal(dat)
+	if err != nil {
+		panic(err)
+	}
+
+	// Upload updated file to bucket
+	UploadToS3(svc, sourceName+fileName, bucketName, output, int64(len(output)))
+}
+
+// Gets a list of all objects ina a S3 bucket
+func getObjectsFromBucket(svc s3.S3, bucketName, folder string) []*s3.Object {
+	params := &s3.ListObjectsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(folder),
+	}
+
+	resp, _ := svc.ListObjects(params)
+	return resp.Contents
+}
+
+// Creates a file in the bucket to list the files
+func createJSONFile(svc s3.S3, bucketName, folderName string, objects []*s3.Object) string {
+	var json = `{"files" : [`
+	for idx, obj := range objects {
+		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
+		if fileName != "index.html" && fileName != "photos.json" && !strings.Contains(fileName, "_thumb.jpg") {
+			if idx != 0 {
+				json += ", "
+			}
+			json += `"` + fileName + `"`
+		}
+	}
+	json += `]}`
+	log.Info("Results = ", json)
+	return json
+}
+
+// Creates index.html to view photos
+func createWebsite(svc s3.S3, bucketName, folderName string) error {
+	template := `<!doctype html>
+	<html lang="en" ng-app="myApp">
+	<head>
+	  <title><%Title%></title>
+	  <link rel='stylesheet'  href='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css' />
+	  <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.4.8/angular.js"></script>
+	  <script type="text/javascript">
+	    var myApp = angular.module('myApp',[]);
+
+	    myApp.controller("MainCtrl", function($scope, $http, $q) {
+	      var res = $http.get("photos.json").then(function successCallback(results) {
+	        $scope.files = results.data.files;
+	      }, function errorCallback(response) {
+	        alert(response)
+	      })
+
+	      // gets thethumbnail name for the file
+	      $scope.getThumbJpg = function(fileName) {
+	        console.log("Test, " + fileName)
+	        var idx = fileName.lastIndexOf(".");
+	        return fileName.slice(0, idx) + "_thumb" + fileName.slice(idx);
+	      }
+	    });
+	</script>
+	</head>
+	<body>
+	  <!--a href="<%Back%>">Back</a-->
+	  <div class="container" ng-controller="MainCtrl">
+			<h1><%Title%></h1>
+			</br>
+	    <div class="navbar" />
+	    <div class="body">
+	      <div ng-repeat="filename in files">
+	        <p>{{filename}}</p>
+	        <a href="{{filename}}"><img ng-src="{{getThumbJpg(filename)}}" class="img-thumbnail" /></a>
+	      </div>
+	    </div>
+	    <div class="footer">
+	      <!--p class="muted">&copy; dylan clement 2016</p-->
+	    </div>
+	  </div>
+	</body>
+	</html>`
+	test := strings.Replace(template, "<%Title%>", folderName, -1)
+	UploadToS3(svc, folderName+"/index.html", bucketName, []byte(test), int64(len(test)))
+	return nil
+}
+
+// processes all items in a bucket, creates an index and file.json
+func processBucket(svc s3.S3, bucketName, folderName string) error {
+	objects := getObjectsFromBucket(svc, bucketName, folderName)
+	jsonFile := createJSONFile(svc, bucketName, folderName, objects)
+	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)))
+	createWebsite(svc, bucketName, folderName)
+	return nil
+}
 
 // Returns a default time of 2000-01-01 UTC
 func defaultTime() time.Time {
@@ -43,21 +158,21 @@ func getFileModTime(fileName string) time.Time {
 }
 
 // Get date taken of a file. If it is a jpg it will attempt to use EXIF data
-func getDateTaken(fileName string) (time.Time, error) {
+func getDateTaken(fileName string) time.Time {
 	if len(fileName) <= 0 {
-		return defaultTime(), errors.New("Invalid filename passed.")
+		return defaultTime()
 	}
 
 	// Get the file extension for example .jpg
 	if !isJpeg(fileName) {
 		// Get the current date and time for files that aren't photos
-		return getFileModTime(fileName), nil
+		return getFileModTime(fileName)
 	}
 
 	// Make sure we can open the file
 	file, err := os.Open(fileName)
 	if err != nil {
-		return defaultTime(), err
+		return defaultTime()
 	}
 	defer file.Close()
 
@@ -73,7 +188,7 @@ func getDateTaken(fileName string) (time.Time, error) {
 		date, _ = data.DateTime()
 	}
 
-	return date, nil
+	return date
 }
 
 // helper to create a folder if it doesn't exist
@@ -110,39 +225,6 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return cerr
-}
-
-// Processes a single photo file, copying it to the output dir and creating thumbnails etc. in S3
-func processPhoto(svc s3.S3, sourceFile, outDir, bucketName, awsRegion string, dateTaken time.Time) error {
-	outPath := dateTaken.Format("2006/2006-01-02")
-	fileName := filepath.Base(sourceFile)
-
-	// If we specified a output folder, organise files
-	if len(outDir) > 0 {
-		createDir(filepath.Join(outDir, dateTaken.Format("2006")))
-		createDir(filepath.Join(outDir, dateTaken.Format("2006/2006-01-02"))) // Can't created nested directories in one go
-		destPath := filepath.Join(outDir, outPath, fileName)
-
-		err := copyFile(sourceFile, destPath)
-		if err != nil {
-			return err
-		}
-
-		log.Info("Copied file: ", destPath)
-	}
-
-	// If we passed in a bucket, upload to S3
-	if len(bucketName) > 0 {
-		destPath := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
-		err := uploadFile(svc, sourceFile, destPath, bucketName)
-		if err != nil {
-			return err
-		}
-
-		log.Info("Uploaded file to bucket: " + bucketName)
-	}
-
-	return nil
 }
 
 // Creates a thumbnail for an image
@@ -206,42 +288,69 @@ func uploadFile(svc s3.S3, fileName, destName, bucketName string) error {
 	return err
 }
 
+// Processes a single photo file, copying it to the output dir and creating thumbnails etc. in S3
+func processPhoto(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken time.Time) error {
+	outPath := dateTaken.Format("2006/2006-01-02")
+	fileName := filepath.Base(sourceFile)
+
+	// If we specified a output folder, organise files
+	if len(outDir) > 0 {
+		createDir(filepath.Join(outDir, dateTaken.Format("2006")))
+		createDir(filepath.Join(outDir, dateTaken.Format("2006/2006-01-02"))) // Can't created nested directories in one go
+		destPath := filepath.Join(outDir, outPath, fileName)
+
+		err := copyFile(sourceFile, destPath)
+		if err != nil {
+			return err
+		}
+
+		log.Info("Copied file: ", destPath)
+	}
+
+	// If we passed in a bucket, upload to S3
+	if len(bucketName) > 0 {
+		destPath := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
+		err := uploadFile(svc, sourceFile, destPath, bucketName)
+		if err != nil {
+			return err
+		}
+
+		log.Info("Uploaded file to bucket: " + bucketName)
+	}
+
+	return nil
+}
+
 // Gets all files in directory
-func getFiles(inDirName string) []string {
+func addFilesToMap(inDirName string, fileMap map[time.Time][]string) {
 	files, err := ioutil.ReadDir(inDirName)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	fileArr := make([]string, len(files))
-	for idx, f := range files {
-		fileArr[idx] = inDirName + "/" + f.Name()
+	for _, f := range files {
+		fileName := inDirName + "/" + f.Name()
+		dateTaken := getDateTaken(fileName)
+		fileMap[dateTaken] = append(fileMap[dateTaken], fileName)
 	}
-	// TODO! Group by date, can then update index/json once per grouping
-
-	return fileArr
 }
 
 // Loops through all files in a dir and processes them all
-func process(inDirName, outDirName, bucketName, awsRegion string) {
+func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 	// Get all files in directory
-	files := getFiles(inDirName)
-	// Create S3 service
-	svc := s3.New(session.New(&aws.Config{Region: aws.String(awsRegion)}))
+	fileMap := make(map[time.Time][]string)
+	addFilesToMap(inDirName, fileMap)
 
-	for _, fileName := range files {
-		// Get date taken for file
-		date, err := getDateTaken(fileName)
-		if err != nil {
-			log.Warn(err.Error())
-		} else {
+	for date, files := range fileMap {
+		for _, fileName := range files {
 			// Organise photo by moving to target folder or uploading it to S3
-			err = processPhoto(*svc, fileName, outDirName, bucketName, awsRegion, date)
+			err := processPhoto(*svc, fileName, outDirName, bucketName, date)
 			if err != nil {
 				log.Fatal(err.Error())
 			}
+			log.Info("Processed file: ", fileName)
 		}
-		log.Info("Processed file: ", fileName)
+		processBucket(*svc, bucketName, date.Format("2006/2006-01-02"))
 	}
 	log.Info("Done processing: ", inDirName)
 }
@@ -259,7 +368,9 @@ func main() {
 		log.Fatal("Error, need to define an input directory.")
 	}
 
-	process(*inDirNamePtr, *outDirNamePtr, *bucketNamePtr, *awsRegionNamePtr)
-	log.Info("Done processing: ", *inDirNamePtr)
+	// Create S3 service
+	svc := s3.New(session.New(&aws.Config{Region: aws.String(*awsRegionNamePtr)}))
 
+	process(svc, *inDirNamePtr, *outDirNamePtr, *bucketNamePtr)
+	log.Info("Done processing: ", *inDirNamePtr)
 }
