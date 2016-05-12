@@ -49,8 +49,9 @@ func createJSONFile(svc s3.S3, bucketName, folderName string, objects []*s3.Obje
 }
 
 // Creates index.html to view photos
-func createWebsite(svc s3.S3, bucketName, folderName string) error {
+func createWebsite(svc s3.S3, bucketName, folderName string, date time.Time) error {
 	test := strings.Replace(websiteTemplate, "<%Title%>", folderName, -1)
+	test = strings.Replace(test, "<%Back%>", date.Format("../../2006/index.html"), -1)
 	UploadToS3(svc, folderName+"/index.html", bucketName, []byte(test), int64(len(test)))
 	return nil
 }
@@ -67,7 +68,7 @@ func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	}*/
 	var dateStruct map[string][]string
 	reader, _ := GetFromS3(svc, datesFile, bucketName)
-	if reader != nil {
+	if reader == nil {
 		// file doesn't exist, create it
 		dateStruct = make(map[string][]string)
 	} else {
@@ -86,7 +87,6 @@ func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	if !found {
 		dateStruct["dates"] = append(dateStruct["dates"], dateFull)
 		dateJSON, _ := json.Marshal(dateStruct)
-		log.Info("Date json = ", string(dateJSON), " - ", dateStruct)
 		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)))
 	}
 
@@ -108,7 +108,7 @@ func processBucket(svc s3.S3, bucketName string, date time.Time) error {
 	objects := getObjectsFromBucket(svc, bucketName, folderName)
 	jsonFile := createJSONFile(svc, bucketName, folderName, objects)
 	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)))
-	createWebsite(svc, bucketName, folderName)
+	createWebsite(svc, bucketName, folderName, date)
 	updateFolderWebsite(svc, bucketName, date)
 	updateMainWebsite(svc, bucketName)
 	return nil
@@ -267,7 +267,7 @@ func uploadFile(svc s3.S3, fileName, destName, bucketName string) error {
 }
 
 // Processes a single photo file, copying it to the output dir and creating thumbnails etc. in S3
-func processPhoto(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken time.Time) error {
+func processFile(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken time.Time) error {
 	outPath := dateTaken.Format("2006/2006-01-02")
 	fileName := filepath.Base(sourceFile)
 
@@ -293,7 +293,7 @@ func processPhoto(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken ti
 			return err
 		}
 
-		log.Info("Uploaded file to bucket: " + bucketName)
+		log.Info("Uploaded file ", fileName, " to bucket: "+bucketName)
 	}
 
 	return nil
@@ -319,14 +319,22 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 	fileMap := make(map[time.Time][]string)
 	addFilesToMap(inDirName, fileMap)
 
+	//sem := make(chan int, 1) // Have 8 running concurrently
+
 	for date, files := range fileMap {
 		for _, fileName := range files {
 			// Organise photo by moving to target folder or uploading it to S3
-			err := processPhoto(*svc, fileName, outDirName, bucketName, date)
+
+			//	go func(fileNameInner string, dateInner time.Time) {
+			//	sem <- 1 // Wait for active queue to drain.
+			err := processFile(*svc, fileName, outDirName, bucketName, date)
 			if err != nil {
 				log.Fatal(err.Error())
 			}
 			log.Info("Processed file: ", fileName)
+			//<-sem // Done; enable next request to run.
+			//}(fileName, date)
+
 		}
 		processBucket(*svc, bucketName, date)
 	}
@@ -378,15 +386,16 @@ const websiteTemplate = `<!doctype html>
 </script>
 </head>
 <body>
-	<!--a href="<%Back%>">Back</a-->
 	<div class="container" ng-controller="MainCtrl">
-		<h1><%Title%></h1>
-		</br>
-		<div class="navbar" />
+		<h2><%Title%></h2>
+		<div class="col-lg-12">
+      <a class="pull-right" href="<%Back%>">Back</a>
+    </div>
 		<div class="body">
 			<div ng-repeat="filename in files">
-				<p>{{filename}}</p>
-				<a href="{{filename}}"><img ng-src="{{getThumbJpg(filename)}}" class="img-thumbnail" /></a>
+				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
+					<a href="{{filename}}"><img ng-src="{{getThumbJpg(filename)}}" class="img-thumbnail" alt="{{filename}}"/></a>
+				</div>
 			</div>
 		</div>
 	</div>

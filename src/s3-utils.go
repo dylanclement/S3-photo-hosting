@@ -57,7 +57,7 @@ func GetFromS3(svc s3.S3, sourceName, bucketName string) (io.Reader, int64) {
 		// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
 	}
 
-	log.Info("Fetching ", sourceName, " from ", bucketName)
+	//log.Info("Fetching ", sourceName, " from ", bucketName)
 	resp, err := svc.GetObject(params)
 	if err != nil {
 		if awsErr, ok := err.(awserr.Error); ok {
