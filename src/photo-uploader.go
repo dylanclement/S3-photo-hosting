@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"image/jpeg"
 	"io"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	filepath "path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
@@ -63,9 +67,6 @@ func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	datesFile := dateYear + "/dates.json"
 
 	// Unmarshal into struct
-	/*type dateFileStruct struct {
-		dates []string
-	}*/
 	var dateStruct map[string][]string
 	reader, _ := GetFromS3(svc, datesFile, bucketName)
 	if reader == nil {
@@ -86,13 +87,14 @@ func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	// Date doesn't exist in list
 	if !found {
 		dateStruct["dates"] = append(dateStruct["dates"], dateFull)
+		sort.Strings(dateStruct["dates"])
 		dateJSON, _ := json.Marshal(dateStruct)
 		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)))
-	}
 
-	// Create index.html file
-	test := strings.Replace(folderTemplate, "<%Title%>", dateYear, -1)
-	UploadToS3(svc, dateYear+"/index.html", bucketName, []byte(test), int64(len(test)))
+		// Create index.html file
+		test := strings.Replace(folderTemplate, "<%Title%>", dateYear, -1)
+		UploadToS3(svc, dateYear+"/index.html", bucketName, []byte(test), int64(len(test)))
+	}
 	return nil
 }
 
@@ -123,6 +125,11 @@ func defaultTime() time.Time {
 func isJpeg(fileName string) bool {
 	fileExt := strings.ToLower(filepath.Ext(fileName))
 	return fileExt == ".jpg" || fileExt == ".jpeg"
+}
+
+func isMovie(fileName string) bool {
+	fileExt := strings.ToLower(filepath.Ext(fileName))
+	return fileExt == ".mpg" || fileExt == ".mpeg" || fileExt == ".avi" || fileExt == ".mp4"
 }
 
 // Helper to get file modification time, useful as a fallback if file is not a jpg.
@@ -231,10 +238,12 @@ func createThumbNail(inFile string, width uint) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+const thumbNailSize = 160
+
 // Uploads a single file to S3. This needs to create a thumbnail, create update
 //   the index.html for the folder and for the parent directory.
-func uploadFile(svc s3.S3, fileName, destName, bucketName string) error {
-	file, err := os.Open(fileName)
+func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) error {
+	file, err := os.Open(sourceFile)
 
 	if err != nil {
 		log.Error(err)
@@ -250,18 +259,26 @@ func uploadFile(svc s3.S3, fileName, destName, bucketName string) error {
 	// read file content to buffer
 	file.Read(buffer)
 
+	destName := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
 	UploadToS3(svc, destName, bucketName, buffer, size)
 
 	// If this is a photo create a thumbnail
-	if isJpeg(fileName) {
-		thumbBuf, thumbErr := createThumbNail(fileName, 128)
+	if isJpeg(sourceFile) {
+		thumbBuf, thumbErr := createThumbNail(sourceFile, thumbNailSize)
 		if thumbErr != nil {
 			log.Error("Error creating thumbnail: ", err.Error())
 		}
 		// Upload
-		UploadToS3(svc, strings.Replace(destName, ".jpg", "_thumb.jpg", 1), bucketName, thumbBuf, int64(len(thumbBuf)))
+		UploadToS3(svc, outPath+"/"+filepath.Base(fileName)+"_thumb.jpg", bucketName, thumbBuf, int64(len(thumbBuf)))
+	} else if isMovie(sourceFile) {
+		cmd := exec.Command("ffmpeg", "-i", sourceFile, "-vframes", "1", "-s", fmt.Sprintf("%dx%d", thumbNailSize, 1), "-f", "singlejpeg", "-")
+		var buffer bytes.Buffer
+		cmd.Stdout = &buffer
+		if cmd.Run() != nil {
+			log.Panic("Could not generate frame from movie ", sourceFile)
+		}
+		UploadToS3(svc, outPath+"/"+filepath.Base(fileName)+"_thumb.jpg", bucketName, buffer.Bytes(), int64(buffer.Len()))
 	}
-	// TODO! create a thumbnail for movies
 
 	return err
 }
@@ -287,8 +304,7 @@ func processFile(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken tim
 
 	// If we passed in a bucket, upload to S3
 	if len(bucketName) > 0 {
-		destPath := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
-		err := uploadFile(svc, sourceFile, destPath, bucketName)
+		err := uploadFile(svc, sourceFile, outPath, fileName, bucketName)
 		if err != nil {
 			return err
 		}
@@ -307,9 +323,15 @@ func addFilesToMap(inDirName string, fileMap map[time.Time][]string) {
 	}
 
 	for _, f := range files {
-		fileName := inDirName + "/" + f.Name()
-		dateTaken := getDateTaken(fileName)
-		fileMap[dateTaken] = append(fileMap[dateTaken], fileName)
+		if f.IsDir() {
+			addFilesToMap(filepath.Join(inDirName, f.Name()), fileMap)
+		} else {
+			if isJpeg(f.Name()) || isMovie(f.Name()) {
+				fileName := filepath.Join(inDirName, f.Name())
+				dateTaken := getDateTaken(fileName)
+				fileMap[dateTaken] = append(fileMap[dateTaken], fileName)
+			}
+		}
 	}
 }
 
@@ -319,23 +341,29 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 	fileMap := make(map[time.Time][]string)
 	addFilesToMap(inDirName, fileMap)
 
-	//sem := make(chan int, 1) // Have 8 running concurrently
+	// Since we are using go routines to process the files, create channels and sync waits
+	sem := make(chan int, 8) // Have 8 running concurrently
+	var wg sync.WaitGroup
 
 	for date, files := range fileMap {
 		for _, fileName := range files {
 			// Organise photo by moving to target folder or uploading it to S3
 
-			//	go func(fileNameInner string, dateInner time.Time) {
-			//	sem <- 1 // Wait for active queue to drain.
-			err := processFile(*svc, fileName, outDirName, bucketName, date)
-			if err != nil {
-				log.Fatal(err.Error())
-			}
-			log.Info("Processed file: ", fileName)
-			//<-sem // Done; enable next request to run.
-			//}(fileName, date)
+			wg.Add(1)
+			go func(fileNameInner string, dateInner time.Time) {
+				sem <- 1 // Wait for active queue to drain.
+				err := processFile(*svc, fileNameInner, outDirName, bucketName, dateInner)
+				if err != nil {
+					log.Fatal(err.Error())
+				}
+				log.Info("Processed file: ", fileNameInner)
+
+				wg.Done()
+				<-sem // Done; enable next request to run.
+			}(fileName, date)
 
 		}
+		wg.Wait() // Wait for all goroutines to finish
 		processBucket(*svc, bucketName, date)
 	}
 }
@@ -387,9 +415,9 @@ const websiteTemplate = `<!doctype html>
 </head>
 <body>
 	<div class="container" ng-controller="MainCtrl">
-		<h2><%Title%></h2>
+		<a href="<%BACK%>"><%YEAR%></a><h2><%DATE%></h2>
 		<div class="col-lg-12">
-      <a class="pull-right" href="<%Back%>">Back</a>
+
     </div>
 		<div class="body">
 			<div ng-repeat="filename in files">
