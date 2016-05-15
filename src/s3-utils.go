@@ -14,7 +14,15 @@ import (
 )
 
 // UploadToS3 uploads a buffer to S3
-func UploadToS3(svc s3.S3, destName, bucketName string, buffer []byte, size int64) {
+func UploadToS3(svc s3.S3, destName, bucketName string, buffer []byte, size int64, overwrite bool) {
+	if overwrite == false {
+		objects := GetObjectsFromBucket(svc, bucketName, destName)
+		if len(objects) > 0 {
+			log.Info("File already exists, skipping. ", destName)
+			return
+		}
+	}
+
 	fileBytes := bytes.NewReader(buffer) // convert to io.ReadSeeker type
 
 	fileType := http.DetectContentType(buffer)
@@ -79,4 +87,15 @@ func GetFromS3(svc s3.S3, sourceName, bucketName string) (io.Reader, int64) {
 	}
 
 	return resp.Body, *resp.ContentLength
+}
+
+// GetObjectsFromBucket gets a list of all objects in a a S3 bucket
+func GetObjectsFromBucket(svc s3.S3, bucketName, prefix string) []*s3.Object {
+	params := &s3.ListObjectsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(prefix),
+	}
+
+	resp, _ := svc.ListObjects(params)
+	return resp.Contents
 }

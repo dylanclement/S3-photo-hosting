@@ -26,17 +26,10 @@ import (
 )
 
 var awsSession *session.Session
+var overwrite = false
 
-// Gets a list of all objects in a a S3 bucket
-func getObjectsFromBucket(svc s3.S3, bucketName, folder string) []*s3.Object {
-	params := &s3.ListObjectsInput{
-		Bucket: aws.String(bucketName),
-		Prefix: aws.String(folder),
-	}
-
-	resp, _ := svc.ListObjects(params)
-	return resp.Contents
-}
+// TODO! show thumbnail(s) in folderName
+// TODO! Embed videos (http://stackoverflow.com/questions/10009918/how-can-i-embed-an-mpg-into-my-webpage)
 
 // Creates a file in the bucket to list the files
 func createJSONFile(svc s3.S3, bucketName, folderName string, objects []*s3.Object) string {
@@ -61,7 +54,7 @@ func createWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	test = strings.Replace(test, "<%BACK%>", date.Format("../../2006/index.html"), -1)
 	test = strings.Replace(test, "<%YEAR%>", date.Format("2006"), -1)
 	test = strings.Replace(test, "<%DATE%>", date.Format("2006-01-02"), -1)
-	UploadToS3(svc, date.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)))
+	UploadToS3(svc, date.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)), overwrite)
 	return nil
 }
 
@@ -94,27 +87,27 @@ func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
 		dateStruct["dates"] = append(dateStruct["dates"], dateFull)
 		sort.Strings(dateStruct["dates"])
 		dateJSON, _ := json.Marshal(dateStruct)
-		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)))
+		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), overwrite)
 
 		// Create index.html file
 		test := strings.Replace(folderTemplate, "<%Title%>", dateYear, -1)
-		UploadToS3(svc, dateYear+"/index.html", bucketName, []byte(test), int64(len(test)))
+		UploadToS3(svc, dateYear+"/index.html", bucketName, []byte(test), int64(len(test)), overwrite)
 	}
 	return nil
 }
 
 func updateMainWebsite(svc s3.S3, bucketName string) error {
 	test := strings.Replace(mainTemplate, "<%Title%>", bucketName, -1)
-	UploadToS3(svc, "index.html", bucketName, []byte(test), int64(len(test)))
+	UploadToS3(svc, "index.html", bucketName, []byte(test), int64(len(test)), overwrite)
 	return nil
 }
 
 // processes all items in a bucket, creates an index and file.json
 func processBucket(svc s3.S3, bucketName string, date time.Time) error {
 	folderName := date.Format("2006/2006-01-02")
-	objects := getObjectsFromBucket(svc, bucketName, folderName)
+	objects := GetObjectsFromBucket(svc, bucketName, folderName)
 	jsonFile := createJSONFile(svc, bucketName, folderName, objects)
-	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)))
+	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), overwrite)
 	createWebsite(svc, bucketName, date)
 	updateFolderWebsite(svc, bucketName, date)
 	updateMainWebsite(svc, bucketName)
@@ -265,9 +258,10 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 	file.Read(buffer)
 
 	destName := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
-	UploadToS3(svc, destName, bucketName, buffer, size)
+	UploadToS3(svc, destName, bucketName, buffer, size, overwrite)
 
 	// If this is a photo create a thumbnail
+	thumbFile := outPath + "/" + fileName[0:len(fileName)-4] + "_thumb.jpg"
 	if isJpeg(sourceFile) {
 		thumbBuf, thumbErr := createThumbNail(sourceFile, thumbNailSize)
 		if thumbErr != nil {
@@ -275,15 +269,15 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 		}
 		// Upload
 		// TODO! Get length of extension, this won;t work for .JPEG files
-		UploadToS3(svc, outPath+"/"+fileName[0:len(fileName)-3]+"_thumb.jpg", bucketName, thumbBuf, int64(len(thumbBuf)))
+		UploadToS3(svc, thumbFile, bucketName, thumbBuf, int64(len(thumbBuf)), overwrite)
 	} else if isMovie(sourceFile) {
-		cmd := exec.Command("ffmpeg", "-i", sourceFile, "-vframes", "1", "-s", fmt.Sprintf("%dx%d", thumbNailSize, 1), "-f", "singlejpeg", "-")
+		cmd := exec.Command("ffmpeg", "-i", sourceFile, "-vframes", "1", "-s", fmt.Sprintf("%dx%d", thumbNailSize, thumbNailSize/4*3), "-f", "singlejpeg", "-")
 		var buffer bytes.Buffer
 		cmd.Stdout = &buffer
 		if cmd.Run() != nil {
 			log.Panic("Could not generate frame from movie ", sourceFile)
 		}
-		UploadToS3(svc, outPath+"/"+filepath.Base(fileName)+"_thumb.jpg", bucketName, buffer.Bytes(), int64(buffer.Len()))
+		UploadToS3(svc, thumbFile, bucketName, buffer.Bytes(), int64(buffer.Len()), overwrite)
 	}
 
 	return err
@@ -292,7 +286,7 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 // Processes a single photo file, copying it to the output dir and creating thumbnails etc. in S3
 func processFile(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken time.Time) error {
 	outPath := dateTaken.Format("2006/2006-01-02")
-	fileName := filepath.Base(sourceFile)
+	fileName := strings.Replace(filepath.Base(sourceFile), " ", "", -1)
 
 	// If we specified a output folder, organise files
 	if len(outDir) > 0 {
@@ -381,8 +375,10 @@ func main() {
 	outDirNamePtr := flag.String("o", "", "output directory")
 	bucketNamePtr := flag.String("b", "", "bucket name")
 	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
+	flag.BoolVar(&overwrite, "f", false, "overwrite")
 	// Parse command line arguments.
 	flag.Parse()
+	log.Info("Overwrite: ", overwrite)
 	if len(*inDirNamePtr) == 0 {
 		log.Fatal("Error, need to define an input directory.")
 	}
@@ -415,7 +411,7 @@ const websiteTemplate = `<!doctype html>
 			$scope.getThumbJpg = function(fileName) {
 				console.log("Test, " + fileName)
 				var idx = fileName.lastIndexOf(".");
-				return fileName.slice(0, idx) + "_thumb" + fileName.slice(idx);
+				return fileName.slice(0, idx) + "_thumb.jpg";
 			}
 		});
 </script>
@@ -462,9 +458,11 @@ const folderTemplate = `<!doctype html>
 		</br>
 		<div class="navbar" />
 		<div class="body">
-			<div ng-repeat="date in dates">
-				<p>{{date}}</p>
-				<a href="{{date}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+			<div class="col-lg-3 col-md-4 col-xs-6 thumb">
+				<div ng-repeat="date in dates">
+					<p>{{date}}</p>
+					<a href="{{date}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -496,9 +494,11 @@ const mainTemplate = `<!doctype html>
 		</br>
 		<div class="navbar" />
 		<div class="body">
-			<div ng-repeat="year in years">
-				<p>{{year}}</p>
-				<a href="{{year}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+			<div class="col-lg-3 col-md-4 col-xs-6 thumb">
+				<div ng-repeat="year in years">
+					<p>{{year}}</p>
+					<a href="{{year}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+				</div>
 			</div>
 		</div>
   </div>
