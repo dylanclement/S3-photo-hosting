@@ -25,6 +25,8 @@ import (
 	"github.com/rwcarlsen/goexif/exif"
 )
 
+var awsSession *session.Session
+
 // Gets a list of all objects in a a S3 bucket
 func getObjectsFromBucket(svc s3.S3, bucketName, folder string) []*s3.Object {
 	params := &s3.ListObjectsInput{
@@ -53,10 +55,13 @@ func createJSONFile(svc s3.S3, bucketName, folderName string, objects []*s3.Obje
 }
 
 // Creates index.html to view photos
-func createWebsite(svc s3.S3, bucketName, folderName string, date time.Time) error {
+func createWebsite(svc s3.S3, bucketName string, date time.Time) error {
+	folderName := date.Format("2006/2006-01-02")
 	test := strings.Replace(websiteTemplate, "<%Title%>", folderName, -1)
-	test = strings.Replace(test, "<%Back%>", date.Format("../../2006/index.html"), -1)
-	UploadToS3(svc, folderName+"/index.html", bucketName, []byte(test), int64(len(test)))
+	test = strings.Replace(test, "<%BACK%>", date.Format("../../2006/index.html"), -1)
+	test = strings.Replace(test, "<%YEAR%>", date.Format("2006"), -1)
+	test = strings.Replace(test, "<%DATE%>", date.Format("2006-01-02"), -1)
+	UploadToS3(svc, date.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)))
 	return nil
 }
 
@@ -110,7 +115,7 @@ func processBucket(svc s3.S3, bucketName string, date time.Time) error {
 	objects := getObjectsFromBucket(svc, bucketName, folderName)
 	jsonFile := createJSONFile(svc, bucketName, folderName, objects)
 	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)))
-	createWebsite(svc, bucketName, folderName, date)
+	createWebsite(svc, bucketName, date)
 	updateFolderWebsite(svc, bucketName, date)
 	updateMainWebsite(svc, bucketName)
 	return nil
@@ -124,7 +129,7 @@ func defaultTime() time.Time {
 // Checks whether a file is a jpeg
 func isJpeg(fileName string) bool {
 	fileExt := strings.ToLower(filepath.Ext(fileName))
-	return fileExt == ".jpg" || fileExt == ".jpeg"
+	return fileExt == ".jpg" // TODO! || fileExt == ".jpeg"
 }
 
 func isMovie(fileName string) bool {
@@ -269,7 +274,8 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 			log.Error("Error creating thumbnail: ", err.Error())
 		}
 		// Upload
-		UploadToS3(svc, outPath+"/"+filepath.Base(fileName)+"_thumb.jpg", bucketName, thumbBuf, int64(len(thumbBuf)))
+		// TODO! Get length of extension, this won;t work for .JPEG files
+		UploadToS3(svc, outPath+"/"+fileName[0:len(fileName)-3]+"_thumb.jpg", bucketName, thumbBuf, int64(len(thumbBuf)))
 	} else if isMovie(sourceFile) {
 		cmd := exec.Command("ffmpeg", "-i", sourceFile, "-vframes", "1", "-s", fmt.Sprintf("%dx%d", thumbNailSize, 1), "-f", "singlejpeg", "-")
 		var buffer bytes.Buffer
@@ -382,7 +388,8 @@ func main() {
 	}
 
 	// Create S3 service
-	svc := s3.New(session.New(&aws.Config{Region: aws.String(*awsRegionNamePtr)}))
+	awsSession = session.New(&aws.Config{Region: aws.String(*awsRegionNamePtr)})
+	svc := s3.New(awsSession)
 
 	process(svc, *inDirNamePtr, *outDirNamePtr, *bucketNamePtr)
 	log.Info("Done processing: ", *inDirNamePtr)
