@@ -54,22 +54,34 @@ func createWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	test = strings.Replace(test, "<%BACK%>", date.Format("../../2006/index.html"), -1)
 	test = strings.Replace(test, "<%YEAR%>", date.Format("2006"), -1)
 	test = strings.Replace(test, "<%DATE%>", date.Format("2006-01-02"), -1)
-	UploadToS3(svc, date.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)), overwrite)
+	UploadToS3(svc, date.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)), true)
 	return nil
 }
 
-func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
+type folderStruct struct {
+	Date  string `json:"date"`
+	Thumb string `json:"thumb"`
+}
+
+// NameSorter sorts planets by name.
+type folderSorter []folderStruct
+
+func (a folderSorter) Len() int           { return len(a) }
+func (a folderSorter) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a folderSorter) Less(i, j int) bool { return a[i].Date < a[j].Date }
+
+func addDateToFolderWebsite(svc s3.S3, bucketName, thumb string, date time.Time) error {
 	// Create dates.json file
 	dateYear := date.Format("2006")
 	dateFull := date.Format("2006-01-02")
 	datesFile := dateYear + "/dates.json"
 
 	// Unmarshal into struct
-	var dateStruct map[string][]string
+	var dateStruct map[string][]folderStruct
 	reader, _ := GetFromS3(svc, datesFile, bucketName)
 	if reader == nil {
 		// file doesn't exist, create it
-		dateStruct = make(map[string][]string)
+		dateStruct = make(map[string][]folderStruct)
 	} else {
 		json.NewDecoder(reader).Decode(&dateStruct)
 	}
@@ -77,17 +89,21 @@ func updateFolderWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	// Check if date exists in array
 	found := false
 	for _, dateF := range dateStruct["dates"] {
-		if dateFull == dateF {
+		if dateFull == dateF.Date {
 			found = true
 		}
 	}
 
 	// Date doesn't exist in list
 	if !found {
-		dateStruct["dates"] = append(dateStruct["dates"], dateFull)
-		sort.Strings(dateStruct["dates"])
+		// Insert the first item
+		s := folderStruct{dateFull, thumb}
+		dateStruct["dates"] = append(dateStruct["dates"], s)
+		sort.Sort(folderSorter(dateStruct["dates"]))
 		dateJSON, _ := json.Marshal(dateStruct)
-		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), overwrite)
+		log.Info("Adding to folder ", s)
+		// TODO! This isn't working
+		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), true)
 
 		// Create index.html file
 		test := strings.Replace(folderTemplate, "<%Title%>", dateYear, -1)
@@ -109,7 +125,15 @@ func processBucket(svc s3.S3, bucketName string, date time.Time) error {
 	jsonFile := createJSONFile(svc, bucketName, folderName, objects)
 	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), overwrite)
 	createWebsite(svc, bucketName, date)
-	updateFolderWebsite(svc, bucketName, date)
+	thumbImg := "http://findicons.com/files/icons/2221/folder/128/normal_folder.png"
+	for _, obj := range objects {
+		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
+		if strings.HasSuffix(fileName, "_thumb.jpg") {
+			thumbImg = date.Format("2006-01-02/") + fileName
+			break
+		}
+	}
+	addDateToFolderWebsite(svc, bucketName, thumbImg, date)
 	updateMainWebsite(svc, bucketName)
 	return nil
 }
@@ -127,7 +151,7 @@ func isJpeg(fileName string) bool {
 
 func isMovie(fileName string) bool {
 	fileExt := strings.ToLower(filepath.Ext(fileName))
-	return fileExt == ".mpg" || fileExt == ".mpeg" || fileExt == ".avi" || fileExt == ".mp4"
+	return fileExt == ".mpg" || fileExt == ".mpeg" || fileExt == ".avi" || fileExt == ".mp4" || fileExt == ".3gp"
 }
 
 // Helper to get file modification time, useful as a fallback if file is not a jpg.
@@ -458,10 +482,10 @@ const folderTemplate = `<!doctype html>
 		</br>
 		<div class="navbar" />
 		<div class="body">
-			<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-				<div ng-repeat="date in dates">
-					<p>{{date}}</p>
-					<a href="{{date}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
+			<div ng-repeat="date in dates">
+				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
+					<p>{{date.date}}</p>
+					<a href="{{date.date}}/index.html"><img ng-src="{{date.thumb}}" class="img-thumbnail" /></a>
 				</div>
 			</div>
 		</div>
