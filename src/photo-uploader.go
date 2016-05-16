@@ -28,7 +28,6 @@ import (
 var awsSession *session.Session
 var overwrite = false
 
-// TODO! show thumbnail(s) in folderName
 // TODO! Embed videos (http://stackoverflow.com/questions/10009918/how-can-i-embed-an-mpg-into-my-webpage)
 
 // Creates a file in the bucket to list the files
