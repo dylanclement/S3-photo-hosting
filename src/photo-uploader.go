@@ -46,14 +46,35 @@ func createJSONFile(bucketName, folderName string, objects []*s3.Object) string 
 	return json
 }
 
-// Creates index.html to view photos
-func createWebsite(svc s3.S3, bucketName string, date time.Time) error {
-	folderName := date.Format("2006/2006-01-02")
-	test := strings.Replace(websiteTemplate, "<%Title%>", folderName, -1)
-	test = strings.Replace(test, "<%BACK%>", date.Format("../../2006/index.html"), -1)
-	test = strings.Replace(test, "<%YEAR%>", date.Format("2006"), -1)
-	test = strings.Replace(test, "<%DATE%>", date.Format("2006-01-02"), -1)
-	UploadToS3(svc, date.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)), true)
+// Processes all items in a folder in a bucker, creates an index and file.json
+func createJSONandWebsiteForFolder(svc s3.S3, bucketName string, folder time.Time) error {
+	// Creates and uploads photos.json
+	folderName := folder.Format("2006/2006-01-02")
+	objects := GetObjectsFromBucket(svc, bucketName, folderName)
+	jsonFile := createJSONFile(bucketName, folderName, objects)
+	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), true)
+
+	// Creates and uploads index.html
+	test := strings.Replace(WebsiteTemplate, "<%Title%>", folderName, -1)
+	test = strings.Replace(test, "<%BACK%>", folder.Format("../../2006/index.html"), -1)
+	test = strings.Replace(test, "<%YEAR%>", folder.Format("2006"), -1)
+	test = strings.Replace(test, "<%DATE%>", folder.Format("2006-01-02"), -1)
+	UploadToS3(svc, folder.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)), true)
+
+	// Add's the date to the folder website .json file, also passes in a thumbnail
+	thumbImg := "http://findicons.com/files/icons/2221/folder/128/normal_folder.png"
+	for _, obj := range objects {
+		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
+		if strings.HasSuffix(fileName, "_thumb.jpg") {
+			// Creates the thumbnail for the folder from the first thumbnail in the dir
+			thumbImg = folder.Format("2006-01-02/") + fileName
+			break
+		}
+	}
+	addDateToFolderWebsite(svc, bucketName, thumbImg, folder)
+
+	// Finally update the main website
+	addYearToMainWebsite(svc, bucketName, folder)
 	return nil
 }
 
@@ -103,7 +124,7 @@ func addDateToFolderWebsite(svc s3.S3, bucketName, thumb string, date time.Time)
 		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), true)
 
 		// Create index.html file
-		test := strings.Replace(folderTemplate, "<%Title%>", dateYear, -1)
+		test := strings.Replace(FolderTemplate, "<%Title%>", dateYear, -1)
 		UploadToS3(svc, dateYear+"/index.html", bucketName, []byte(test), int64(len(test)), overwrite)
 	}
 	return nil
@@ -141,7 +162,7 @@ func addYearToMainWebsite(svc s3.S3, bucketName string, date time.Time) error {
 		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), true)
 
 		// Create index.html file
-		test := strings.Replace(mainTemplate, "<%Title%>", bucketName, -1)
+		test := strings.Replace(MainTemplate, "<%Title%>", bucketName, -1)
 		UploadToS3(svc, "index.html", bucketName, []byte(test), int64(len(test)), overwrite)
 	}
 	return nil
@@ -207,7 +228,7 @@ func getDateTaken(fileName string) time.Time {
 	return date
 }
 
-// helper to create a folder if it doesn't exist
+// Helper to create a folder if it doesn't exist
 func createDir(dirName string) {
 	if _, err := os.Stat(dirName); os.IsNotExist(err) {
 		// Ok directory doesn't exist, create it
@@ -220,21 +241,21 @@ func createDir(dirName string) {
 
 // Helper function to copy a file
 func copyFile(src, dst string) error {
-	// open input file
+	// Open input file
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	// create dest file
+	// Create dest file
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
 
-	// copy contents from source to destination
+	// Copy contents from source to destination
 	_, err = io.Copy(out, in)
 	cerr := out.Close()
 	if err != nil {
@@ -252,17 +273,17 @@ func createThumbNail(inFile string, width uint) ([]byte, error) {
 
 	defer file.Close()
 
-	// decode jpeg into image.Image
+	// Decode jpeg into image.Image
 	img, err := jpeg.Decode(file)
 	if err != nil {
 		return nil, err
 	}
 
-	// resize to width using Lanczos resampling and preserve aspect ratio
+	// Resize to width using Lanczos resampling and preserve aspect ratio
 	m := resize.Resize(width, 0, img, resize.Lanczos3)
 	out := new(bytes.Buffer)
 
-	// write new image to buffer
+	// Write new image to buffer
 	jpeg.Encode(out, m, nil)
 
 	log.Info("Created thumbnail for file: ", inFile)
@@ -271,7 +292,7 @@ func createThumbNail(inFile string, width uint) ([]byte, error) {
 
 const thumbNailSize = 160
 
-// Uploads a single file to S3. This needs to create a thumbnail, create update
+// Uploads a single file to S3. This needs to create a thumbnail, create or update
 //   the index.html for the folder and for the parent directory.
 func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) error {
 	file, err := os.Open(sourceFile)
@@ -287,7 +308,7 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 
 	buffer := make([]byte, size)
 
-	// read file content to buffer
+	// Read file content to buffer
 	file.Read(buffer)
 
 	destName := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
@@ -300,9 +321,8 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 		if thumbErr != nil {
 			log.Error("Error creating thumbnail: ", err.Error())
 		}
-		// Upload
-		// TODO! Get length of extension, this won;t work for .JPEG files
 		UploadToS3(svc, thumbFile, bucketName, thumbBuf, int64(len(thumbBuf)), overwrite)
+		// Else if it is a movie use ffmpeg to grab the first frame
 	} else if isMovie(sourceFile) {
 		cmd := exec.Command("ffmpeg", "-i", sourceFile, "-vframes", "1", "-s", fmt.Sprintf("%dx%d", thumbNailSize, thumbNailSize/4*3), "-f", "singlejpeg", "-")
 		var buffer bytes.Buffer
@@ -368,43 +388,14 @@ func addFilesToMap(inDirName string, fileMap map[time.Time][]string) {
 	}
 }
 
-// processes all items in a bucket, creates an index and file.json
-func createJSONandWebsiteForFolder(svc s3.S3, bucketName string, folder time.Time) error {
-	folderName := folder.Format("2006/2006-01-02")
-	objects := GetObjectsFromBucket(svc, bucketName, folderName)
-	jsonFile := createJSONFile(bucketName, folderName, objects)
-	// Upload photos.json
-	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), true)
-
-	// Creates the index.html
-	createWebsite(svc, bucketName, folder)
-
-	// Creates the thumbnail from the first thumbnail
-	thumbImg := "http://findicons.com/files/icons/2221/folder/128/normal_folder.png"
-	for _, obj := range objects {
-		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
-		if strings.HasSuffix(fileName, "_thumb.jpg") {
-			thumbImg = folder.Format("2006-01-02/") + fileName
-			break
-		}
-	}
-
-	// Add's the date to the folder website .json file, also passes in a thumbnail
-	addDateToFolderWebsite(svc, bucketName, thumbImg, folder)
-
-	// Finally update the main website
-	addYearToMainWebsite(svc, bucketName, folder)
-	return nil
-}
-
 // Loops through all files in a dir and processes them all
-func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
+func process(svc *s3.S3, inDirName, outDirName, bucketName string, numThreads int) {
 	// Get all files in directory
 	fileMap := make(map[time.Time][]string)
 	addFilesToMap(inDirName, fileMap)
 
 	// Since we are using go routines to process the files, create channels and sync waits
-	sem := make(chan int, 8) // Have 8 running concurrently
+	sem := make(chan int, numThreads) // Have numThreads go routines running concurrently
 	var wg sync.WaitGroup
 
 	for date, files := range fileMap {
@@ -413,7 +404,7 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 
 			wg.Add(1)
 			go func(fileNameInner string, dateInner time.Time) {
-				sem <- 1 // Wait for active queue to drain.
+				sem <- 1 // Wait for active queue to drain
 				err := processFile(*svc, fileNameInner, outDirName, bucketName, dateInner)
 				if err != nil {
 					log.Fatal(err.Error())
@@ -423,126 +414,11 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 				wg.Done()
 				<-sem // Done; enable next request to run.
 			}(fileName, date)
-
 		}
 		wg.Wait() // Wait for all goroutines to finish
 		createJSONandWebsiteForFolder(*svc, bucketName, date)
 	}
 }
-
-const websiteTemplate = `<!doctype html>
-<html lang="en" ng-app="myApp">
-<head>
-	<title><%Title%></title>
-	<link rel='stylesheet'  href='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css' />
-	<script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.4.8/angular.js"></script>
-	<script type="text/javascript">
-		var myApp = angular.module('myApp',[]);
-
-		myApp.controller("MainCtrl", function($scope, $http, $q) {
-			var res = $http.get("photos.json").then(function successCallback(results) {
-				$scope.files = results.data.files;
-			}, function errorCallback(response) {
-				alert(response)
-			})
-
-			// gets thethumbnail name for the file
-			$scope.getThumbJpg = function(fileName) {
-				console.log("Test, " + fileName)
-				var idx = fileName.lastIndexOf(".");
-				return fileName.slice(0, idx) + "_thumb.jpg";
-			}
-		});
-</script>
-</head>
-<body>
-	<div class="container" ng-controller="MainCtrl">
-		<a href="<%BACK%>"><%YEAR%></a><h2><%DATE%></h2>
-		<div class="col-lg-12">
-
-    </div>
-		<div class="body">
-			<div ng-repeat="filename in files">
-				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-					<a href="{{filename}}"><img ng-src="{{getThumbJpg(filename)}}" class="img-thumbnail" alt="{{filename}}"/></a>
-				</div>
-			</div>
-		</div>
-	</div>
-</body>
-</html>`
-
-const folderTemplate = `<!doctype html>
-<html lang="en" ng-app="myApp">
-<head>
-<title><%Title%></title>
-<link rel='stylesheet'  href='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css' />
-<script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.4.8/angular.js"></script>
-<script type="text/javascript">
-	var myApp = angular.module('myApp',[]);
-
-	myApp.controller("MainCtrl", function($scope, $http, $q) {
-		var res = $http.get("dates.json").then(function successCallback(results) {
-			$scope.dates = results.data.dates;
-		}, function errorCallback(response) {
-			alert(response)
-		})
-	});
-</script>
-</head>
-<body>
-	<!--a href="<%Back%>">Back</a-->
-	<div class="container" ng-controller="MainCtrl">
-		<h1><%Title%></h1>
-		</br>
-		<div class="navbar" />
-		<div class="body">
-			<div ng-repeat="date in dates">
-				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-					<p>{{date.date}}</p>
-					<a href="{{date.date}}/index.html"><img ng-src="{{date.thumb}}" class="img-thumbnail" /></a>
-				</div>
-			</div>
-		</div>
-	</div>
-</div>
-</body>
-</html>`
-
-const mainTemplate = `<!doctype html>
-<html lang="en" ng-app="myApp">
-<head>
-  <title><%Title%></title>
-  <link rel='stylesheet'  href='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css' />
-  <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.4.8/angular.js"></script>
-  <script type="text/javascript">
-    var myApp = angular.module('myApp',[]);
-
-    myApp.controller("MainCtrl", function($scope, $http, $q) {
-      var res = $http.get("years.json").then(function successCallback(results) {
-        $scope.years = results.data.years;
-      }, function errorCallback(response) {
-        alert(response)
-      })
-    });
-</script>
-</head>
-<body>
-	<div class="container" ng-controller="MainCtrl">
-		<h1><%Title%></h1>
-		</br>
-		<div class="navbar" />
-		<div class="body">
-			<div ng-repeat="year in years">
-				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-					<p>{{year}}</p>
-					<a href="{{year}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
-				</div>
-			</div>
-		</div>
-  </div>
-</body>
-</html>`
 
 func main() {
 	// Declare a string parameter
@@ -550,6 +426,7 @@ func main() {
 	inDirNamePtr := flag.String("i", "", "input directory")
 	outDirNamePtr := flag.String("o", "", "output directory")
 	bucketNamePtr := flag.String("b", "", "bucket name")
+	numThreadsPtr := flag.Int("n", 8, "number of threads to spawn")
 	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
 	flag.BoolVar(&overwrite, "f", false, "overwrite")
 	// Parse command line arguments.
@@ -563,6 +440,6 @@ func main() {
 	awsSession = session.New(&aws.Config{Region: aws.String(*awsRegionNamePtr)})
 	svc := s3.New(awsSession)
 
-	process(svc, *inDirNamePtr, *outDirNamePtr, *bucketNamePtr)
+	process(svc, *inDirNamePtr, *outDirNamePtr, *bucketNamePtr, *numThreadsPtr)
 	log.Info("Done processing: ", *inDirNamePtr)
 }
