@@ -31,7 +31,7 @@ var overwrite = false
 // TODO! Embed videos (http://stackoverflow.com/questions/10009918/how-can-i-embed-an-mpg-into-my-webpage)
 
 // Creates a file in the bucket to list the files
-func createJSONFile(svc s3.S3, bucketName, folderName string, objects []*s3.Object) string {
+func createJSONFile(bucketName, folderName string, objects []*s3.Object) string {
 	var json = `{"files" : [`
 	for idx, obj := range objects {
 		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
@@ -100,8 +100,6 @@ func addDateToFolderWebsite(svc s3.S3, bucketName, thumb string, date time.Time)
 		dateStruct["dates"] = append(dateStruct["dates"], s)
 		sort.Sort(folderSorter(dateStruct["dates"]))
 		dateJSON, _ := json.Marshal(dateStruct)
-		log.Info("Adding to folder ", s)
-		// TODO! This isn't working
 		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), true)
 
 		// Create index.html file
@@ -111,29 +109,41 @@ func addDateToFolderWebsite(svc s3.S3, bucketName, thumb string, date time.Time)
 	return nil
 }
 
-func updateMainWebsite(svc s3.S3, bucketName string) error {
-	test := strings.Replace(mainTemplate, "<%Title%>", bucketName, -1)
-	UploadToS3(svc, "index.html", bucketName, []byte(test), int64(len(test)), overwrite)
-	return nil
-}
+func addYearToMainWebsite(svc s3.S3, bucketName string, date time.Time) error {
+	// Create dates.json file
+	dateYear := date.Format("2006")
+	datesFile := "years.json"
 
-// processes all items in a bucket, creates an index and file.json
-func processBucket(svc s3.S3, bucketName string, date time.Time) error {
-	folderName := date.Format("2006/2006-01-02")
-	objects := GetObjectsFromBucket(svc, bucketName, folderName)
-	jsonFile := createJSONFile(svc, bucketName, folderName, objects)
-	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), overwrite)
-	createWebsite(svc, bucketName, date)
-	thumbImg := "http://findicons.com/files/icons/2221/folder/128/normal_folder.png"
-	for _, obj := range objects {
-		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
-		if strings.HasSuffix(fileName, "_thumb.jpg") {
-			thumbImg = date.Format("2006-01-02/") + fileName
-			break
+	// Unmarshal into struct
+	var dateStruct map[string][]string
+	reader, _ := GetFromS3(svc, datesFile, bucketName)
+	if reader == nil {
+		// file doesn't exist, create it
+		dateStruct = make(map[string][]string)
+	} else {
+		json.NewDecoder(reader).Decode(&dateStruct)
+	}
+
+	// Check if date exists in array
+	found := false
+	for _, dateF := range dateStruct["years"] {
+		if dateYear == dateF {
+			found = true
 		}
 	}
-	addDateToFolderWebsite(svc, bucketName, thumbImg, date)
-	updateMainWebsite(svc, bucketName)
+
+	// Date doesn't exist in list
+	if !found {
+		// Insert the first item
+		dateStruct["years"] = append(dateStruct["years"], dateYear)
+		sort.Strings(dateStruct["years"])
+		dateJSON, _ := json.Marshal(dateStruct)
+		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), true)
+
+		// Create index.html file
+		test := strings.Replace(mainTemplate, "<%Title%>", bucketName, -1)
+		UploadToS3(svc, "index.html", bucketName, []byte(test), int64(len(test)), overwrite)
+	}
 	return nil
 }
 
@@ -358,6 +368,35 @@ func addFilesToMap(inDirName string, fileMap map[time.Time][]string) {
 	}
 }
 
+// processes all items in a bucket, creates an index and file.json
+func createJSONandWebsiteForFolder(svc s3.S3, bucketName string, folder time.Time) error {
+	folderName := folder.Format("2006/2006-01-02")
+	objects := GetObjectsFromBucket(svc, bucketName, folderName)
+	jsonFile := createJSONFile(bucketName, folderName, objects)
+	// Upload photos.json
+	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), true)
+
+	// Creates the index.html
+	createWebsite(svc, bucketName, folder)
+
+	// Creates the thumbnail from the first thumbnail
+	thumbImg := "http://findicons.com/files/icons/2221/folder/128/normal_folder.png"
+	for _, obj := range objects {
+		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
+		if strings.HasSuffix(fileName, "_thumb.jpg") {
+			thumbImg = folder.Format("2006-01-02/") + fileName
+			break
+		}
+	}
+
+	// Add's the date to the folder website .json file, also passes in a thumbnail
+	addDateToFolderWebsite(svc, bucketName, thumbImg, folder)
+
+	// Finally update the main website
+	addYearToMainWebsite(svc, bucketName, folder)
+	return nil
+}
+
 // Loops through all files in a dir and processes them all
 func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 	// Get all files in directory
@@ -387,31 +426,8 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 
 		}
 		wg.Wait() // Wait for all goroutines to finish
-		processBucket(*svc, bucketName, date)
+		createJSONandWebsiteForFolder(*svc, bucketName, date)
 	}
-}
-
-func main() {
-	// Declare a string parameter
-
-	inDirNamePtr := flag.String("i", "", "input directory")
-	outDirNamePtr := flag.String("o", "", "output directory")
-	bucketNamePtr := flag.String("b", "", "bucket name")
-	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
-	flag.BoolVar(&overwrite, "f", false, "overwrite")
-	// Parse command line arguments.
-	flag.Parse()
-	log.Info("Overwrite: ", overwrite)
-	if len(*inDirNamePtr) == 0 {
-		log.Fatal("Error, need to define an input directory.")
-	}
-
-	// Create S3 service
-	awsSession = session.New(&aws.Config{Region: aws.String(*awsRegionNamePtr)})
-	svc := s3.New(awsSession)
-
-	process(svc, *inDirNamePtr, *outDirNamePtr, *bucketNamePtr)
-	log.Info("Done processing: ", *inDirNamePtr)
 }
 
 const websiteTemplate = `<!doctype html>
@@ -517,8 +533,8 @@ const mainTemplate = `<!doctype html>
 		</br>
 		<div class="navbar" />
 		<div class="body">
-			<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-				<div ng-repeat="year in years">
+			<div ng-repeat="year in years">
+				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
 					<p>{{year}}</p>
 					<a href="{{year}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
 				</div>
@@ -527,3 +543,26 @@ const mainTemplate = `<!doctype html>
   </div>
 </body>
 </html>`
+
+func main() {
+	// Declare a string parameter
+
+	inDirNamePtr := flag.String("i", "", "input directory")
+	outDirNamePtr := flag.String("o", "", "output directory")
+	bucketNamePtr := flag.String("b", "", "bucket name")
+	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
+	flag.BoolVar(&overwrite, "f", false, "overwrite")
+	// Parse command line arguments.
+	flag.Parse()
+	log.Info("Overwrite: ", overwrite)
+	if len(*inDirNamePtr) == 0 {
+		log.Fatal("Error, need to define an input directory.")
+	}
+
+	// Create S3 service
+	awsSession = session.New(&aws.Config{Region: aws.String(*awsRegionNamePtr)})
+	svc := s3.New(awsSession)
+
+	process(svc, *inDirNamePtr, *outDirNamePtr, *bucketNamePtr)
+	log.Info("Done processing: ", *inDirNamePtr)
+}
