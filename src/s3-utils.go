@@ -14,12 +14,12 @@ import (
 )
 
 // UploadToS3 uploads a buffer to S3
-func UploadToS3(svc s3.S3, destName, bucketName string, buffer []byte, size int64, overwrite bool) {
+func UploadToS3(svc s3.S3, destName, bucketName string, buffer []byte, size int64, overwrite bool) bool {
 	if overwrite == false {
 		objects := GetObjectsFromBucket(svc, bucketName, destName)
 		if len(objects) > 0 {
 			log.Info("File already exists, skipping. ", destName)
-			return
+			return false
 		}
 	}
 
@@ -54,7 +54,10 @@ func UploadToS3(svc s3.S3, destName, bucketName string, buffer []byte, size int6
 			// error which satisfies the awserr.Error interface.
 			log.Fatal("Fatal AWS error: ", err.Error())
 		}
+		return false
 	}
+	log.Info("Uploaded file ", destName, " to bucket: ", bucketName)
+	return true
 }
 
 // GetFromS3 gets an object from S3

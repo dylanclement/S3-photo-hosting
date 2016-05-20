@@ -49,11 +49,40 @@ func createJSONFile(bucketName, folderName string, objects []*s3.Object) string 
 // Creates index.html to view photos
 func createWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	folderName := date.Format("2006/2006-01-02")
-	test := strings.Replace(websiteTemplate, "<%Title%>", folderName, -1)
+	test := strings.Replace(WebsiteTemplate, "<%Title%>", folderName, -1)
 	test = strings.Replace(test, "<%BACK%>", date.Format("../../2006/index.html"), -1)
 	test = strings.Replace(test, "<%YEAR%>", date.Format("2006"), -1)
 	test = strings.Replace(test, "<%DATE%>", date.Format("2006-01-02"), -1)
 	UploadToS3(svc, date.Format("2006/2006-01-02/index.html"), bucketName, []byte(test), int64(len(test)), true)
+	return nil
+}
+
+// processes all items in a bucket, creates an index and file.json
+func createJSONandWebsiteForFolder(svc s3.S3, bucketName string, folder time.Time) error {
+	folderName := folder.Format("2006/2006-01-02")
+	objects := GetObjectsFromBucket(svc, bucketName, folderName)
+	jsonFile := createJSONFile(bucketName, folderName, objects)
+	// Upload photos.json
+	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), true)
+
+	// Creates the index.html
+	createWebsite(svc, bucketName, folder)
+
+	// Creates the thumbnail from the first thumbnail
+	thumbImg := "http://findicons.com/files/icons/2221/folder/128/normal_folder.png"
+	for _, obj := range objects {
+		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
+		if strings.HasSuffix(fileName, "_thumb.jpg") {
+			thumbImg = folder.Format("2006-01-02/") + fileName
+			break
+		}
+	}
+
+	// Add's the date to the folder website .json file, also passes in a thumbnail
+	addDateToFolderWebsite(svc, bucketName, thumbImg, folder)
+
+	// Finally update the main website
+	addYearToMainWebsite(svc, bucketName, folder)
 	return nil
 }
 
@@ -103,7 +132,7 @@ func addDateToFolderWebsite(svc s3.S3, bucketName, thumb string, date time.Time)
 		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), true)
 
 		// Create index.html file
-		test := strings.Replace(folderTemplate, "<%Title%>", dateYear, -1)
+		test := strings.Replace(FolderTemplate, "<%TITLE%>", dateYear, -1)
 		UploadToS3(svc, dateYear+"/index.html", bucketName, []byte(test), int64(len(test)), overwrite)
 	}
 	return nil
@@ -141,7 +170,7 @@ func addYearToMainWebsite(svc s3.S3, bucketName string, date time.Time) error {
 		UploadToS3(svc, datesFile, bucketName, dateJSON, int64(len(dateJSON)), true)
 
 		// Create index.html file
-		test := strings.Replace(mainTemplate, "<%Title%>", bucketName, -1)
+		test := strings.Replace(MainTemplate, "<%Title%>", bucketName, -1)
 		UploadToS3(svc, "index.html", bucketName, []byte(test), int64(len(test)), overwrite)
 	}
 	return nil
@@ -291,7 +320,12 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 	file.Read(buffer)
 
 	destName := outPath + "/" + fileName // AWS uses forward slashes so don't use filePath.Join
-	UploadToS3(svc, destName, bucketName, buffer, size, overwrite)
+	copied := UploadToS3(svc, destName, bucketName, buffer, size, overwrite)
+
+	if !copied {
+		// no need to upload thumbnail
+		return nil
+	}
 
 	// If this is a photo create a thumbnail
 	thumbFile := outPath + "/" + fileName[0:len(fileName)-4] + "_thumb.jpg"
@@ -341,15 +375,13 @@ func processFile(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken tim
 		if err != nil {
 			return err
 		}
-
-		log.Info("Uploaded file ", fileName, " to bucket: "+bucketName)
 	}
 
 	return nil
 }
 
 // Gets all files in directory
-func addFilesToMap(inDirName string, fileMap map[time.Time][]string) {
+func addFilesToMap(inDirName string, fileMap map[string][]string) {
 	files, err := ioutil.ReadDir(inDirName)
 	if err != nil {
 		log.Fatal(err.Error())
@@ -357,57 +389,41 @@ func addFilesToMap(inDirName string, fileMap map[time.Time][]string) {
 
 	for _, f := range files {
 		if f.IsDir() {
-			addFilesToMap(filepath.Join(inDirName, f.Name()), fileMap)
+			dirName := f.Name()
+			if dirName[0] == '.' {
+				continue
+			}
+			addFilesToMap(filepath.Join(inDirName, dirName), fileMap)
 		} else {
 			if isJpeg(f.Name()) || isMovie(f.Name()) {
 				fileName := filepath.Join(inDirName, f.Name())
 				dateTaken := getDateTaken(fileName)
-				fileMap[dateTaken] = append(fileMap[dateTaken], fileName)
+				dateKey := dateTaken.Format("2006-01-02")
+				fileMap[dateKey] = append(fileMap[dateKey], fileName)
 			}
 		}
 	}
 }
 
-// processes all items in a bucket, creates an index and file.json
-func createJSONandWebsiteForFolder(svc s3.S3, bucketName string, folder time.Time) error {
-	folderName := folder.Format("2006/2006-01-02")
-	objects := GetObjectsFromBucket(svc, bucketName, folderName)
-	jsonFile := createJSONFile(bucketName, folderName, objects)
-	// Upload photos.json
-	UploadToS3(svc, folderName+"/photos.json", bucketName, []byte(jsonFile), int64(len(jsonFile)), true)
-
-	// Creates the index.html
-	createWebsite(svc, bucketName, folder)
-
-	// Creates the thumbnail from the first thumbnail
-	thumbImg := "http://findicons.com/files/icons/2221/folder/128/normal_folder.png"
-	for _, obj := range objects {
-		fileName := strings.TrimPrefix(*obj.Key, folderName+"/")
-		if strings.HasSuffix(fileName, "_thumb.jpg") {
-			thumbImg = folder.Format("2006-01-02/") + fileName
-			break
-		}
-	}
-
-	// Add's the date to the folder website .json file, also passes in a thumbnail
-	addDateToFolderWebsite(svc, bucketName, thumbImg, folder)
-
-	// Finally update the main website
-	addYearToMainWebsite(svc, bucketName, folder)
-	return nil
-}
-
 // Loops through all files in a dir and processes them all
 func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 	// Get all files in directory
-	fileMap := make(map[time.Time][]string)
+	fileMap := make(map[string][]string)
 	addFilesToMap(inDirName, fileMap)
 
 	// Since we are using go routines to process the files, create channels and sync waits
 	sem := make(chan int, 8) // Have 8 running concurrently
 	var wg sync.WaitGroup
 
-	for date, files := range fileMap {
+	for dateKey, files := range fileMap {
+
+		// Get date from dateKey (ignoring time taken for photo)
+		date, err := time.Parse("2006-01-02", dateKey)
+		if err != nil {
+			log.Error("Error parsing date: ", dateKey)
+			continue
+		}
+
 		for _, fileName := range files {
 			// Organise photo by moving to target folder or uploading it to S3
 
@@ -418,7 +434,6 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 				if err != nil {
 					log.Fatal(err.Error())
 				}
-				log.Info("Processed file: ", fileNameInner)
 
 				wg.Done()
 				<-sem // Done; enable next request to run.
@@ -429,119 +444,6 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 		createJSONandWebsiteForFolder(*svc, bucketName, date)
 	}
 }
-
-const websiteTemplate = `<!doctype html>
-<html lang="en" ng-app="myApp">
-<head>
-	<title><%Title%></title>
-	<link rel='stylesheet'  href='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css' />
-	<script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.4.8/angular.js"></script>
-	<script type="text/javascript">
-		var myApp = angular.module('myApp',[]);
-
-		myApp.controller("MainCtrl", function($scope, $http, $q) {
-			var res = $http.get("photos.json").then(function successCallback(results) {
-				$scope.files = results.data.files;
-			}, function errorCallback(response) {
-				alert(response)
-			})
-
-			// gets thethumbnail name for the file
-			$scope.getThumbJpg = function(fileName) {
-				console.log("Test, " + fileName)
-				var idx = fileName.lastIndexOf(".");
-				return fileName.slice(0, idx) + "_thumb.jpg";
-			}
-		});
-</script>
-</head>
-<body>
-	<div class="container" ng-controller="MainCtrl">
-		<a href="<%BACK%>"><%YEAR%></a><h2><%DATE%></h2>
-		<div class="col-lg-12">
-
-    </div>
-		<div class="body">
-			<div ng-repeat="filename in files">
-				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-					<a href="{{filename}}"><img ng-src="{{getThumbJpg(filename)}}" class="img-thumbnail" alt="{{filename}}"/></a>
-				</div>
-			</div>
-		</div>
-	</div>
-</body>
-</html>`
-
-const folderTemplate = `<!doctype html>
-<html lang="en" ng-app="myApp">
-<head>
-<title><%Title%></title>
-<link rel='stylesheet'  href='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css' />
-<script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.4.8/angular.js"></script>
-<script type="text/javascript">
-	var myApp = angular.module('myApp',[]);
-
-	myApp.controller("MainCtrl", function($scope, $http, $q) {
-		var res = $http.get("dates.json").then(function successCallback(results) {
-			$scope.dates = results.data.dates;
-		}, function errorCallback(response) {
-			alert(response)
-		})
-	});
-</script>
-</head>
-<body>
-	<!--a href="<%Back%>">Back</a-->
-	<div class="container" ng-controller="MainCtrl">
-		<h1><%Title%></h1>
-		</br>
-		<div class="navbar" />
-		<div class="body">
-			<div ng-repeat="date in dates">
-				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-					<p>{{date.date}}</p>
-					<a href="{{date.date}}/index.html"><img ng-src="{{date.thumb}}" class="img-thumbnail" /></a>
-				</div>
-			</div>
-		</div>
-	</div>
-</div>
-</body>
-</html>`
-
-const mainTemplate = `<!doctype html>
-<html lang="en" ng-app="myApp">
-<head>
-  <title><%Title%></title>
-  <link rel='stylesheet'  href='https://maxcdn.bootstrapcdn.com/bootstrap/3.3.6/css/bootstrap.min.css' />
-  <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.4.8/angular.js"></script>
-  <script type="text/javascript">
-    var myApp = angular.module('myApp',[]);
-
-    myApp.controller("MainCtrl", function($scope, $http, $q) {
-      var res = $http.get("years.json").then(function successCallback(results) {
-        $scope.years = results.data.years;
-      }, function errorCallback(response) {
-        alert(response)
-      })
-    });
-</script>
-</head>
-<body>
-	<div class="container" ng-controller="MainCtrl">
-		<h1><%Title%></h1>
-		</br>
-		<div class="body">
-			<div ng-repeat="year in years">
-				<div class="col-lg-3 col-md-4 col-xs-6 thumb">
-					<p>{{year}}</p>
-					<a href="{{year}}/index.html"><img ng-src="http://findicons.com/files/icons/2221/folder/128/normal_folder.png" class="img-thumbnail" /></a>
-				</div>
-			</div>
-		</div>
-  </div>
-</body>
-</html>`
 
 func main() {
 	// Declare a string parameter
