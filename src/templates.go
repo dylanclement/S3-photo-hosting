@@ -81,6 +81,7 @@ ul { list-style-type: none; }
 <body>
 	<div class="container" ng-controller="MainCtrl">
 		<h2><%TITLE%></h1>
+		<a class="h2" href="../index.html">BACK/</a>
 		</br>
 		<div class="body">
 			<ul id="image-list" class="row">
