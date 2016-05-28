@@ -405,11 +405,47 @@ func addFilesToMap(inDirName string, fileMap map[string][]string) {
 	}
 }
 
+func removeExisting(svc s3.S3, bucketName string, fileMap map[string][]string) {
+	for dateKey, files := range fileMap {
+		date, _ := time.Parse("2006-01-02", dateKey)
+		folderName := date.Format("2006/2006-01-02")
+		s3Objs := GetObjectsFromBucket(svc, bucketName, folderName)
+		var newFiles []string
+
+		// Loop through files and S3 objects, if the file exists add it to a new array
+		for _, fileName := range files {
+			found := false
+			for _, obj := range s3Objs {
+				s3FileName := strings.TrimPrefix(*obj.Key, folderName+"/")
+				if filepath.Base(fileName) == s3FileName {
+					found = true
+					log.Info("File ", fileName, " already exists on S3, skipping...")
+					break
+				}
+			}
+			if !found {
+				newFiles = append(newFiles, fileName)
+			}
+		}
+		// Replace old list with new one
+		if len(newFiles) <= 0 {
+			log.Info("Nothing to add for ", dateKey, " so deleting.")
+			delete(fileMap, dateKey) // remove key if all files are already on
+		} else {
+			log.Info("Adding newFiles ", newFiles)
+			fileMap[dateKey] = newFiles
+		}
+	}
+}
+
 // Loops through all files in a dir and processes them all
 func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 	// Get all files in directory
 	fileMap := make(map[string][]string)
 	addFilesToMap(inDirName, fileMap)
+	if !overwrite {
+		removeExisting(*svc, bucketName, fileMap)
+	}
 
 	// Since we are using go routines to process the files, create channels and sync waits
 	sem := make(chan int, 8) // Have 8 running concurrently
