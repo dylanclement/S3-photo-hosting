@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	filepath "path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -194,6 +195,17 @@ func isMovie(fileName string) bool {
 
 // Helper to get file modification time, useful as a fallback if file is not a jpg.
 func getFileModTime(fileName string) time.Time {
+	var containsDateRegExp = regexp.MustCompile(`^(\d{8})_.*`)
+	matches := containsDateRegExp.FindStringSubmatch(fileName)
+	// if filename is eg. 20160513_181656.mp4 get the date from the filename instead
+	if len(matches) > 0 {
+		// useful if we re-encode a badly encoded camera movie, then we don't want to use the modified date
+		dateStr := matches[1]
+		date, _ := time.Parse("20060102", dateStr)
+		return date
+	}
+
+	// else fetch the files last modification timne
 	stat, err := os.Stat(fileName)
 	if err != nil {
 		log.Error("Unable to get ModTime for file: ", fileName)
@@ -486,7 +498,7 @@ func main() {
 
 	inDirNamePtr := flag.String("i", "", "input directory")
 	outDirNamePtr := flag.String("o", "", "output directory")
-	bucketNamePtr := flag.String("b", "", "bucket name")
+	bucketNamePtr := flag.String("n", "", "bucket name")
 	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
 	flag.BoolVar(&overwrite, "f", false, "overwrite")
 	// Parse command line arguments.
