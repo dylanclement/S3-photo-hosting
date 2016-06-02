@@ -61,7 +61,7 @@ func UploadToS3(svc s3.S3, destName, bucketName string, buffer []byte, size int6
 }
 
 // GetFromS3 gets an object from S3
-func GetFromS3(svc s3.S3, sourceName, bucketName string) (io.Reader, int64) {
+func GetFromS3(svc s3.S3, sourceName, bucketName string) io.Reader {
 	params := &s3.GetObjectInput{
 		Bucket: aws.String(bucketName), // required
 		Key:    aws.String(sourceName), // required
@@ -74,7 +74,7 @@ func GetFromS3(svc s3.S3, sourceName, bucketName string) (io.Reader, int64) {
 		if awsErr, ok := err.(awserr.Error); ok {
 			if awsErr.Code() == "NoSuchKey" {
 				// file doesn exist
-				return nil, 0
+				return nil
 			}
 			// Generic AWS Error with Code, Message, and original error (if any)
 			log.Error("AWS error: ", awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
@@ -89,7 +89,7 @@ func GetFromS3(svc s3.S3, sourceName, bucketName string) (io.Reader, int64) {
 		}
 	}
 
-	return resp.Body, *resp.ContentLength
+	return resp.Body
 }
 
 // GetObjectsFromBucket gets a list of all objects in a a S3 bucket

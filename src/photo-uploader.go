@@ -6,13 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"image/jpeg"
-	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	filepath "path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -22,8 +19,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/nfnt/resize"
-	"github.com/rwcarlsen/goexif/exif"
 )
 
 var awsSession *session.Session
@@ -107,7 +102,7 @@ func addDateToFolderWebsite(svc s3.S3, bucketName, thumb string, date time.Time)
 
 	// Unmarshal into struct
 	var dateStruct map[string][]folderStruct
-	reader, _ := GetFromS3(svc, datesFile, bucketName)
+	reader := GetFromS3(svc, datesFile, bucketName)
 	if reader == nil {
 		// file doesn't exist, create it
 		dateStruct = make(map[string][]folderStruct)
@@ -146,7 +141,7 @@ func addYearToMainWebsite(svc s3.S3, bucketName string, date time.Time) error {
 
 	// Unmarshal into struct
 	var dateStruct map[string][]string
-	reader, _ := GetFromS3(svc, datesFile, bucketName)
+	reader := GetFromS3(svc, datesFile, bucketName)
 	if reader == nil {
 		// file doesn't exist, create it
 		dateStruct = make(map[string][]string)
@@ -177,141 +172,6 @@ func addYearToMainWebsite(svc s3.S3, bucketName string, date time.Time) error {
 	return nil
 }
 
-// Returns a default time of 2000-01-01 UTC
-func defaultTime() time.Time {
-	return time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
-}
-
-// Checks whether a file is a jpeg
-func isJpeg(fileName string) bool {
-	fileExt := strings.ToLower(filepath.Ext(fileName))
-	return fileExt == ".jpg" // TODO! || fileExt == ".jpeg"
-}
-
-func isMovie(fileName string) bool {
-	fileExt := strings.ToLower(filepath.Ext(fileName))
-	return fileExt == ".mpg" || fileExt == ".mpeg" || fileExt == ".avi" || fileExt == ".mp4" || fileExt == ".3gp"
-}
-
-// Helper to get file modification time, useful as a fallback if file is not a jpg.
-func getFileModTime(fileName string) time.Time {
-	var containsDateRegExp = regexp.MustCompile(`^(\d{8})_.*`)
-	matches := containsDateRegExp.FindStringSubmatch(fileName)
-	// if filename is eg. 20160513_181656.mp4 get the date from the filename instead
-	if len(matches) > 0 {
-		// useful if we re-encode a badly encoded camera movie, then we don't want to use the modified date
-		dateStr := matches[1]
-		date, _ := time.Parse("20060102", dateStr)
-		return date
-	}
-
-	// else fetch the files last modification timne
-	stat, err := os.Stat(fileName)
-	if err != nil {
-		log.Error("Unable to get ModTime for file: ", fileName)
-		return defaultTime()
-	}
-	return stat.ModTime()
-}
-
-// Get date taken of a file. If it is a jpg it will attempt to use EXIF data
-func getDateTaken(fileName string) time.Time {
-	if len(fileName) <= 0 {
-		return defaultTime()
-	}
-
-	// Get the file extension for example .jpg
-	if !isJpeg(fileName) {
-		// Get the current date and time for files that aren't photos
-		return getFileModTime(fileName)
-	}
-
-	// Make sure we can open the file
-	file, err := os.Open(fileName)
-	if err != nil {
-		return defaultTime()
-	}
-	defer file.Close()
-
-	// Decode exif data from file
-	var data *exif.Exif
-	var date time.Time
-	data, err = exif.Decode(file)
-	if err != nil {
-		// file might not have exif data, use os.Stat
-		date = getFileModTime(fileName)
-	} else {
-		// get date taken from exif data in jpg
-		date, _ = data.DateTime()
-	}
-
-	return date
-}
-
-// helper to create a folder if it doesn't exist
-func createDir(dirName string) {
-	if _, err := os.Stat(dirName); os.IsNotExist(err) {
-		// Ok directory doesn't exist, create it
-		err := os.Mkdir(dirName, 0777)
-		if err != nil {
-			log.Error("Error creating directory: ", err.Error())
-		}
-	}
-}
-
-// Helper function to copy a file
-func copyFile(src, dst string) error {
-	// open input file
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	// create dest file
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	// copy contents from source to destination
-	_, err = io.Copy(out, in)
-	cerr := out.Close()
-	if err != nil {
-		return err
-	}
-	return cerr
-}
-
-// Creates a thumbnail for an image
-func createThumbNail(inFile string, width uint) ([]byte, error) {
-	file, err := os.Open(inFile)
-	if err != nil {
-		return nil, err
-	}
-
-	defer file.Close()
-
-	// decode jpeg into image.Image
-	img, err := jpeg.Decode(file)
-	if err != nil {
-		return nil, err
-	}
-
-	// resize to width using Lanczos resampling and preserve aspect ratio
-	m := resize.Resize(width, 0, img, resize.Lanczos3)
-	out := new(bytes.Buffer)
-
-	// write new image to buffer
-	jpeg.Encode(out, m, nil)
-
-	log.Info("Created thumbnail for file: ", inFile)
-	return out.Bytes(), nil
-}
-
-const thumbNailSize = 160
-
 // Uploads a single file to S3. This needs to create a thumbnail, create update
 //   the index.html for the folder and for the parent directory.
 func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) error {
@@ -341,15 +201,15 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 
 	// If this is a photo create a thumbnail
 	thumbFile := outPath + "/" + fileName[0:len(fileName)-4] + "_thumb.jpg"
-	if isJpeg(sourceFile) {
-		thumbBuf, thumbErr := createThumbNail(sourceFile, thumbNailSize)
+	if IsJpeg(sourceFile) {
+		thumbBuf, thumbErr := CreateThumbNail(sourceFile, thumbNailSize)
 		if thumbErr != nil {
 			log.Error("Error creating thumbnail: ", err.Error())
 		}
 		// Upload
 		// TODO! Get length of extension, this won;t work for .JPEG files
 		UploadToS3(svc, thumbFile, bucketName, thumbBuf, int64(len(thumbBuf)), overwrite)
-	} else if isMovie(sourceFile) {
+	} else if IsMovie(sourceFile) {
 		cmd := exec.Command("ffmpeg", "-i", sourceFile, "-vframes", "1", "-s", fmt.Sprintf("%dx%d", thumbNailSize, thumbNailSize/4*3), "-f", "singlejpeg", "-")
 		var buffer bytes.Buffer
 		cmd.Stdout = &buffer
@@ -369,11 +229,11 @@ func processFile(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken tim
 
 	// If we specified a output folder, organise files
 	if len(outDir) > 0 {
-		createDir(filepath.Join(outDir, dateTaken.Format("2006")))
-		createDir(filepath.Join(outDir, dateTaken.Format("2006/2006-01-02"))) // Can't created nested directories in one go
+		CreateDir(filepath.Join(outDir, dateTaken.Format("2006")))
+		CreateDir(filepath.Join(outDir, dateTaken.Format("2006/2006-01-02"))) // Can't created nested directories in one go
 		destPath := filepath.Join(outDir, outPath, fileName)
 
-		err := copyFile(sourceFile, destPath)
+		err := CopyFile(sourceFile, destPath)
 		if err != nil {
 			return err
 		}
@@ -407,9 +267,9 @@ func addFilesToMap(inDirName string, fileMap map[string][]string) {
 			}
 			addFilesToMap(filepath.Join(inDirName, dirName), fileMap)
 		} else {
-			if isJpeg(f.Name()) || isMovie(f.Name()) {
+			if IsJpeg(f.Name()) || IsMovie(f.Name()) {
 				fileName := filepath.Join(inDirName, f.Name())
-				dateTaken := getDateTaken(fileName)
+				dateTaken := GetDateTaken(fileName)
 				dateKey := dateTaken.Format("2006-01-02")
 				fileMap[dateKey] = append(fileMap[dateKey], fileName)
 			}
@@ -417,6 +277,7 @@ func addFilesToMap(inDirName string, fileMap map[string][]string) {
 	}
 }
 
+// Remove any files from map already existing in S3
 func removeExisting(svc s3.S3, bucketName string, fileMap map[string][]string) {
 	for dateKey, files := range fileMap {
 		date, _ := time.Parse("2006-01-02", dateKey)
@@ -459,10 +320,6 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 		removeExisting(*svc, bucketName, fileMap)
 	}
 
-	// Since we are using go routines to process the files, create channels and sync waits
-	sem := make(chan int, 8) // Have 8 running concurrently
-	var wg sync.WaitGroup
-
 	for dateKey, files := range fileMap {
 
 		// Get date from dateKey (ignoring time taken for photo)
@@ -472,9 +329,14 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 			continue
 		}
 
-		for _, fileName := range files {
-			// Organise photo by moving to target folder or uploading it to S3
+		// Since we are using go routines to process the files, create channels and sync waits
+		sem := make(chan int, 8) // Have 8 running concurrently
+		var wg sync.WaitGroup
 
+		// Organise photos by moving to target folder or uploading it to S3
+		for _, fileName := range files {
+
+			// Remember to increment the waitgroup by 1 BEFORE starting the goroutine
 			wg.Add(1)
 			go func(fileNameInner string, dateInner time.Time) {
 				sem <- 1 // Wait for active queue to drain.
