@@ -302,7 +302,7 @@ func removeExisting(svc s3.S3, bucketName string, fileMap map[string][]string) {
 		}
 		// Replace old list with new one
 		if len(newFiles) <= 0 {
-			log.Info("Nothing to add for ", dateKey, " so deleting.")
+			log.Info("Nothing to add for ", dateKey, " so removing from list.")
 			delete(fileMap, dateKey) // remove key if all files are already on
 		} else {
 			log.Info("Adding newFiles ", newFiles)

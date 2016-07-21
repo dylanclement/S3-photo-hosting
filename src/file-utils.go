@@ -30,7 +30,7 @@ func IsJpeg(fileName string) bool {
 // IsMovie returns true is the file is a movie
 func IsMovie(fileName string) bool {
 	fileExt := strings.ToLower(filepath.Ext(fileName))
-	return fileExt == ".mpg" || fileExt == ".mpeg" || fileExt == ".avi" || fileExt == ".mp4" || fileExt == ".3gp"
+	return fileExt == ".mpg" || fileExt == ".mpeg" || fileExt == ".avi" || fileExt == ".mp4" || fileExt == ".3gp" || fileExt == ".mov"
 }
 
 // GetFileModTime Helper to get file modification time, useful as a fallback if file is not a jpg.
