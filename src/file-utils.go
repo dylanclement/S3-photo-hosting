@@ -150,4 +150,16 @@ func CreateThumbNail(inFile string, width uint) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// Gets the size of a file in bytes
+func GetFileSize(fileName string) int64 {
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Error(err)
+	}
+	defer file.Close()
+
+	fileInfo, _ := file.Stat()
+	return fileInfo.Size()
+}
+
 const thumbNailSize = 160

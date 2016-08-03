@@ -12,7 +12,6 @@ import (
 	filepath "path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
@@ -222,10 +221,50 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 	return err
 }
 
+// shrink a movie file
+func shrinkMovie(sourceFile, tmpDir string, dateTaken time.Time) string {
+	// Get an output file name, make all files mp4  and make sure we can support multiple files in the same dir
+	destFile := filepath.Join(tmpDir, dateTaken.Format("20060102_150405")+".mp4")
+	for i := 1; ; i++ {
+		if _, err := os.Stat(destFile); os.IsNotExist(err) {
+			break
+		}
+		destFile = filepath.Join(tmpDir, fmt.Sprintf(dateTaken.Format("20060102_150405")+"_%04d.mp4", i))
+	}
+
+	// Run ffmpeg on the input file and save to output dir
+	cmd := exec.Command("ffmpeg", "-i", sourceFile, "-c:v", "libx264", "-preset", "medium", "-crf", "28", "-movflags", "+faststart", "-acodec", "aac", "-strict", "experimental", "-ab", "96k", destFile)
+	if err := cmd.Run(); err != nil {
+		log.Error("Could not run ffmpeg on file: ", sourceFile, err, destFile)
+	}
+	if err := os.Chtimes(destFile, dateTaken, dateTaken); err != nil {
+		log.Error(err)
+	}
+
+	// Check what the ratio input/output is
+	inSize := GetFileSize(sourceFile)
+	outSize := GetFileSize(destFile)
+	ratio := float64(outSize) / float64(inSize)
+	if ratio < 0.93 {
+		// new file is smaller, use that as the new destination
+		log.Info("Using shrunk movie file (", ratio, "): ", destFile, " instead of ", sourceFile)
+		return destFile
+	}
+	log.Info("Ratio not good (", ratio, "), using: ", sourceFile)
+	return sourceFile
+}
+
 // Processes a single photo file, copying it to the output dir and creating thumbnails etc. in S3
-func processFile(svc s3.S3, sourceFile, outDir, bucketName string, dateTaken time.Time) error {
+func processFile(svc s3.S3, sourceFile, outDir, tmpDir, bucketName string, dateTaken time.Time) error {
 	outPath := dateTaken.Format("2006/2006-01-02")
 	fileName := strings.Replace(filepath.Base(sourceFile), " ", "", -1)
+
+	if IsMovie(sourceFile) {
+		// Shrink movie
+		sourceFile = shrinkMovie(sourceFile, tmpDir, dateTaken)
+	}
+	// Sleep to avoid a race condition
+	time.Sleep(100 * time.Millisecond)
 
 	// If we specified a output folder, organise files
 	if len(outDir) > 0 {
@@ -320,6 +359,12 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 		removeExisting(*svc, bucketName, fileMap)
 	}
 
+	// Create temp dir and remember to clean up
+	tmpDir, _ := ioutil.TempDir("", "shrink-file")
+	defer os.RemoveAll(tmpDir) // clean up
+
+	numDirs := len(fileMap)
+	var doneDirs = 0
 	for dateKey, files := range fileMap {
 
 		// Get date from dateKey (ignoring time taken for photo)
@@ -330,27 +375,40 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 		}
 
 		// Since we are using go routines to process the files, create channels and sync waits
-		sem := make(chan int, 8) // Have 8 running concurrently
-		var wg sync.WaitGroup
+		/*
+			sem := make(chan int, 8) // Have 8 running concurrently
+			var wg sync.WaitGroup
 
-		// Organise photos by moving to target folder or uploading it to S3
+			// Organise photos by moving to target folder or uploading it to S3
+			for _, fileName := range files {
+
+				// Remember to increment the waitgroup by 1 BEFORE starting the goroutine
+				wg.Add(1)
+				go func(fileNameInner string, dateInner time.Time) {
+					sem <- 1 // Wait for active queue to drain.
+					err := processFile(*svc, fileNameInner, outDirName, tmpDir, bucketName, dateInner)
+					if err != nil {
+						log.Fatal(err.Error())
+					}
+
+					wg.Done()
+					<-sem // Done; enable next request to run.
+				}(fileName, date)
+
+			}
+			wg.Wait() // Wait for all goroutines to finish
+		*/
+
+		// Can't get goroutines working, not much of a speed improvement as the main bottleneck is AWS uploads.
 		for _, fileName := range files {
-
-			// Remember to increment the waitgroup by 1 BEFORE starting the goroutine
-			wg.Add(1)
-			go func(fileNameInner string, dateInner time.Time) {
-				sem <- 1 // Wait for active queue to drain.
-				err := processFile(*svc, fileNameInner, outDirName, bucketName, dateInner)
-				if err != nil {
-					log.Fatal(err.Error())
-				}
-
-				wg.Done()
-				<-sem // Done; enable next request to run.
-			}(fileName, date)
-
+			err := processFile(*svc, fileName, outDirName, tmpDir, bucketName, date)
+			if err != nil {
+				log.Fatal(err.Error())
+			}
 		}
-		wg.Wait() // Wait for all goroutines to finish
+
+		doneDirs++
+		log.Info("Processed ", doneDirs, " of ", numDirs, " folders.")
 		createJSONandWebsiteForFolder(*svc, bucketName, date)
 	}
 }
