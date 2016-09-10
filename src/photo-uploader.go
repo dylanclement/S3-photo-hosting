@@ -22,6 +22,7 @@ import (
 
 var awsSession *session.Session
 var overwrite = false
+var keepMoviesOriginal = false
 
 // TODO! Embed videos (http://stackoverflow.com/questions/10009918/how-can-i-embed-an-mpg-into-my-webpage)
 
@@ -176,12 +177,6 @@ func addYearToMainWebsite(svc s3.S3, bucketName string, date time.Time) error {
 func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) error {
 	file, err := os.Open(sourceFile)
 
-	if err != nil {
-		log.Error(err)
-	}
-
-	defer file.Close()
-
 	fileInfo, _ := file.Stat()
 	size := fileInfo.Size()
 
@@ -259,8 +254,14 @@ func processFile(svc s3.S3, sourceFile, outDir, tmpDir, bucketName string, dateT
 	outPath := dateTaken.Format("2006/2006-01-02")
 	fileName := strings.Replace(filepath.Base(sourceFile), " ", "", -1)
 
-	if IsMovie(sourceFile) {
+	if IsMovie(sourceFile) && !keepMoviesOriginal {
 		// Shrink movie
+		defer func() {
+			if r := recover(); r != nil {
+				log.Info("Recovered from error, retrying", r)
+				sourceFile = shrinkMovie(sourceFile, tmpDir, dateTaken)
+			}
+		}()
 		sourceFile = shrinkMovie(sourceFile, tmpDir, dateTaken)
 	}
 	// Sleep to avoid a race condition
@@ -414,13 +415,21 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 }
 
 func main() {
-	// Declare a string parameter
+	// Set up log file
+	logFile, err := os.OpenFile("photo-uploader.log", os.O_RDWR|os.O_APPEND|os.O_CREATE, 0660)
+	if err != nil {
+		log.Error(err)
+	}
+	defer logFile.Close()
+	log.SetOutput(logFile)
 
+	// Set variables
 	inDirNamePtr := flag.String("i", "", "input directory")
 	outDirNamePtr := flag.String("o", "", "output directory")
 	bucketNamePtr := flag.String("n", "", "bucket name")
 	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
 	flag.BoolVar(&overwrite, "f", false, "overwrite")
+	flag.BoolVar(&keepMoviesOriginal, "k", true, "don't shrink movies")
 	// Parse command line arguments.
 	flag.Parse()
 	log.Info("Overwrite: ", overwrite)
