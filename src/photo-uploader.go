@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -218,6 +219,7 @@ func uploadFile(svc s3.S3, sourceFile, outPath, fileName, bucketName string) err
 
 // shrink a movie file
 func shrinkMovie(sourceFile, tmpDir string, dateTaken time.Time) string {
+	log.Info("Attempting to shrink file ", sourceFile)
 	// Get an output file name, make all files mp4  and make sure we can support multiple files in the same dir
 	destFile := filepath.Join(tmpDir, dateTaken.Format("20060102_150405")+".mp4")
 	for i := 1; ; i++ {
@@ -228,7 +230,7 @@ func shrinkMovie(sourceFile, tmpDir string, dateTaken time.Time) string {
 	}
 
 	// Run ffmpeg on the input file and save to output dir
-	cmd := exec.Command("ffmpeg", "-i", sourceFile, "-c:v", "libx264", "-preset", "medium", "-crf", "28", "-movflags", "+faststart", "-acodec", "aac", "-strict", "experimental", "-ab", "96k", destFile)
+	cmd := exec.Command("ffmpeg", "-i", sourceFile, "-c:v", "libx264", "-preset", "medium", "-crf", "25", "-movflags", "+faststart", "-acodec", "aac", "-strict", "experimental", "-ab", "96k", destFile)
 	if err := cmd.Run(); err != nil {
 		log.Error("Could not run ffmpeg on file: ", sourceFile, err, destFile)
 	}
@@ -242,7 +244,8 @@ func shrinkMovie(sourceFile, tmpDir string, dateTaken time.Time) string {
 	ratio := float64(outSize) / float64(inSize)
 	if ratio < 0.93 {
 		// new file is smaller, use that as the new destination
-		log.Info("Using shrunk movie file (", ratio, "): ", destFile, " instead of ", sourceFile)
+		newRatio := (1 - ratio) * 100
+		log.Info("Using shrunk movie file (", fmt.Sprintf("%.2f", newRatio), "% reduction).")
 		return destFile
 	}
 	log.Info("Ratio not good (", ratio, "), using: ", sourceFile)
@@ -253,25 +256,55 @@ func shrinkMovie(sourceFile, tmpDir string, dateTaken time.Time) string {
 func processFile(svc s3.S3, sourceFile, outDir, tmpDir, bucketName string, dateTaken time.Time) error {
 	outPath := dateTaken.Format("2006/2006-01-02")
 	fileName := strings.Replace(filepath.Base(sourceFile), " ", "", -1)
+	destPath := filepath.Join(outDir, outPath, fileName)
 
+	// Shrink movie
 	if IsMovie(sourceFile) && !keepMoviesOriginal {
-		// Shrink movie
-		defer func() {
-			if r := recover(); r != nil {
-				log.Info("Recovered from error, retrying", r)
-				sourceFile = shrinkMovie(sourceFile, tmpDir, dateTaken)
-			}
-		}()
-		sourceFile = shrinkMovie(sourceFile, tmpDir, dateTaken)
+
+		// Check if destination file doesn't exist
+		if _, err := os.Stat(destPath); os.IsNotExist(err) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Info("Recovered from error, retrying", r)
+					sourceFile = shrinkMovie(sourceFile, tmpDir, dateTaken)
+				}
+			}()
+			sourceFile = shrinkMovie(sourceFile, tmpDir, dateTaken)
+		}
 	}
+
 	// Sleep to avoid a race condition
-	time.Sleep(100 * time.Millisecond)
+	//time.Sleep(100 * time.Millisecond)
 
 	// If we specified a output folder, organise files
 	if len(outDir) > 0 {
+		// Need to create each nested directory
 		CreateDir(filepath.Join(outDir, dateTaken.Format("2006")))
 		CreateDir(filepath.Join(outDir, dateTaken.Format("2006/2006-01-02"))) // Can't created nested directories in one go
-		destPath := filepath.Join(outDir, outPath, fileName)
+
+		// Check if the output file already exists
+		if destStat, err := os.Stat(destPath); !os.IsNotExist(err) {
+
+			// Might have different file sizes
+			sourceStat, err := os.Stat(sourceFile)
+			if err != nil {
+				log.Error("Source file doesn't exist?: ", sourceFile)
+				return nil
+			}
+
+			if destStat.Size() != sourceStat.Size() {
+				// Movies can have different sizes as we shrink them
+				if IsMovie(sourceFile) {
+					log.Info("Destination file exists for video but fileSizes differ ", sourceFile, " and ", destPath, " will not overwrite (delete destination if not accurate).")
+					return nil
+				}
+
+				log.Info("Destination file exists but fileSizes differ for ", sourceFile, " and ", destPath, " will overwrite.")
+			} else {
+				log.Info("File ", destPath, " already exists.")
+				return nil
+			}
+		}
 
 		err := CopyFile(sourceFile, destPath)
 		if err != nil {
@@ -410,7 +443,9 @@ func process(svc *s3.S3, inDirName, outDirName, bucketName string) {
 
 		doneDirs++
 		log.Info("Processed ", doneDirs, " of ", numDirs, " folders.")
-		createJSONandWebsiteForFolder(*svc, bucketName, date)
+		if len(bucketName) > 0 {
+			createJSONandWebsiteForFolder(*svc, bucketName, date)
+		}
 	}
 }
 
@@ -421,7 +456,8 @@ func main() {
 		log.Error(err)
 	}
 	defer logFile.Close()
-	log.SetOutput(logFile)
+	mw := io.MultiWriter(os.Stdout, logFile) // also log to console
+	log.SetOutput(mw)
 
 	// Set variables
 	inDirNamePtr := flag.String("i", "", "input directory")
@@ -429,7 +465,7 @@ func main() {
 	bucketNamePtr := flag.String("n", "", "bucket name")
 	awsRegionNamePtr := flag.String("r", "us-east-1", "AWS region")
 	flag.BoolVar(&overwrite, "f", false, "overwrite")
-	flag.BoolVar(&keepMoviesOriginal, "k", true, "don't shrink movies")
+	flag.BoolVar(&keepMoviesOriginal, "k", false, "don't shrink movies")
 	// Parse command line arguments.
 	flag.Parse()
 	log.Info("Overwrite: ", overwrite)
